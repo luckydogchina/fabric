@@ -17,18 +17,22 @@ limitations under the License.
 package endorser
 
 import (
+	"encoding/hex"
+	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
-	"path/filepath"
-
-	"errors"
-
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric/bccsp"
+	"github.com/hyperledger/fabric/bccsp/factory"
 	mockpolicies "github.com/hyperledger/fabric/common/mocks/policies"
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/common/util"
@@ -38,6 +42,7 @@ import (
 	"github.com/hyperledger/fabric/core/container"
 	"github.com/hyperledger/fabric/core/peer"
 	syscc "github.com/hyperledger/fabric/core/scc"
+	"github.com/hyperledger/fabric/core/testutil"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/msp/mgmt/testtools"
@@ -45,6 +50,7 @@ import (
 	pb "github.com/hyperledger/fabric/protos/peer"
 	pbutils "github.com/hyperledger/fabric/protos/utils"
 	"github.com/spf13/viper"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -86,6 +92,12 @@ func initPeer(chainID string) (*testEnvironment, error) {
 
 	//initialize ledger
 	peer.MockInitialize()
+
+	mspGetter := func(cid string) []string {
+		return []string{"DEFAULT"}
+	}
+
+	peer.MockSetMSPIDGetter(mspGetter)
 
 	getPeerEndpoint := func() (*pb.PeerEndpoint, error) {
 		return &pb.PeerEndpoint{Id: &pb.PeerID{Name: "testpeer"}, Address: peerAddress}, nil
@@ -276,7 +288,7 @@ func invoke(chainID string, spec *pb.ChaincodeSpec) (*pb.Proposal, *pb.ProposalR
 
 	resp, err := endorserServer.ProcessProposal(context.Background(), signedProp)
 	if err != nil {
-		return nil, nil, "", nil, fmt.Errorf("Error endorsing %s: %s\n", spec.ChaincodeId, err)
+		return nil, nil, "", nil, err
 	}
 
 	return prop, resp, txID, nonce, err
@@ -331,6 +343,25 @@ func TestDeploy(t *testing.T) {
 	if err != nil {
 		t.Fail()
 		t.Logf("Deploy-error in deploy %s", err)
+		chaincode.GetChain().Stop(context.Background(), cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
+		return
+	}
+	chaincode.GetChain().Stop(context.Background(), cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
+}
+
+//REMOVE WHEN JAVA CC IS ENABLED
+func TestJavaDeploy(t *testing.T) {
+	chainID := util.GetTestChainID()
+	//pretend this is a java CC (type 4)
+	spec := &pb.ChaincodeSpec{Type: 4, ChaincodeId: &pb.ChaincodeID{Name: "javacc", Path: "../../examples/chaincode/java/chaincode_example02", Version: "0"}, Input: &pb.ChaincodeInput{Args: [][]byte{[]byte("init"), []byte("a"), []byte("100"), []byte("b"), []byte("200")}}}
+	defer deleteChaincodeOnDisk("javacc.0")
+
+	cccid := ccprovider.NewCCContext(chainID, "javacc", "0", "", false, nil, nil)
+
+	_, _, err := deploy(endorserServer, chainID, spec, nil)
+	if err == nil {
+		t.Fail()
+		t.Logf("expected java CC deploy to fail")
 		chaincode.GetChain().Stop(context.Background(), cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
 		return
 	}
@@ -448,7 +479,27 @@ func TestDeployAndInvoke(t *testing.T) {
 		return
 	}
 
-	fmt.Printf("Invoke test passed\n")
+	// Test chaincode endorsement failure when invalid function name supplied
+	f = "invokeinvalid"
+	invokeArgs = append([]string{f}, args...)
+	spec = &pb.ChaincodeSpec{Type: 1, ChaincodeId: chaincodeID, Input: &pb.ChaincodeInput{Args: util.ToChaincodeArgs(invokeArgs...)}}
+	prop, resp, txid, nonce, err = invoke(chainID, spec)
+	if err == nil {
+		t.Fail()
+		t.Logf("expecting fabric to report error from chaincode failure")
+		chaincode.GetChain().Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: chaincodeID}})
+		return
+	} else if _, ok := err.(*chaincodeError); !ok {
+		t.Fail()
+		t.Logf("expecting chaincode error but found %v", err)
+		chaincode.GetChain().Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: chaincodeID}})
+		return
+	}
+
+	if resp != nil {
+		assert.Equal(t, int32(500), resp.Response.Status, "Unexpected response status")
+	}
+
 	t.Logf("Invoke test passed")
 
 	chaincode.GetChain().Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: chaincodeID}})
@@ -506,7 +557,6 @@ func TestDeployAndUpgrade(t *testing.T) {
 		return
 	}
 
-	fmt.Printf("Upgrade test passed\n")
 	t.Logf("Upgrade test passed")
 
 	chaincode.GetChain().Stop(ctxt, cccid1, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: chaincodeID1}})
@@ -573,10 +623,23 @@ func TestWritersACLFail(t *testing.T) {
 		return
 	}
 
-	fmt.Println("TestWritersACLFail passed")
 	t.Logf("TestWritersACLFail passed")
 
 	chaincode.GetChain().Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: chaincodeID}})
+}
+
+func TestHeaderExtensionNoChaincodeID(t *testing.T) {
+	creator, _ := signer.Serialize()
+	nonce := []byte{1, 2, 3}
+	digest, err := factory.GetDefault().Hash(append(nonce, creator...), &bccsp.SHA256Opts{})
+	txID := hex.EncodeToString(digest)
+	spec := &pb.ChaincodeSpec{Type: 1, ChaincodeId: nil, Input: &pb.ChaincodeInput{Args: util.ToChaincodeArgs()}}
+	invocation := &pb.ChaincodeInvocationSpec{ChaincodeSpec: spec}
+	prop, _, _ := pbutils.CreateChaincodeProposalWithTxIDNonceAndTransient(txID, common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), invocation, []byte{1, 2, 3}, creator, nil)
+	signedProp, _ := getSignedProposal(prop, signer)
+	_, err = endorserServer.ProcessProposal(context.Background(), signedProp)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ChaincodeHeaderExtension.ChaincodeId is nil")
 }
 
 // TestAdminACLFail deploys tried to deploy a chaincode;
@@ -618,7 +681,6 @@ func TestAdminACLFail(t *testing.T) {
 		return
 	}
 
-	fmt.Println("TestAdminACLFail passed")
 	t.Logf("TestATestAdminACLFailCLFail passed")
 
 	chaincode.GetChain().Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: chaincodeID}})
@@ -648,7 +710,7 @@ func newTempDir() string {
 }
 
 func TestMain(m *testing.M) {
-	SetupTestConfig()
+	setupTestConfig()
 
 	chainID := util.GetTestChainID()
 	tev, err := initPeer(chainID)
@@ -682,4 +744,39 @@ func TestMain(m *testing.M) {
 	finitPeer(tev)
 
 	os.Exit(retVal)
+}
+
+func setupTestConfig() {
+	flag.Parse()
+
+	// Now set the configuration file
+	viper.SetEnvPrefix("CORE")
+	viper.AutomaticEnv()
+	replacer := strings.NewReplacer(".", "_")
+	viper.SetEnvKeyReplacer(replacer)
+	viper.SetConfigName("endorser_test") // name of config file (without extension)
+	viper.AddConfigPath("./")            // path to look for the config file in
+	err := viper.ReadInConfig()          // Find and read the config file
+	if err != nil {                      // Handle errors reading the config file
+		panic(fmt.Errorf("Fatal error config file: %s \n", err))
+	}
+
+	testutil.SetupTestLogging()
+
+	// Set the number of maxprocs
+	runtime.GOMAXPROCS(viper.GetInt("peer.gomaxprocs"))
+
+	// Init the BCCSP
+	var bccspConfig *factory.FactoryOpts
+	err = viper.UnmarshalKey("peer.BCCSP", &bccspConfig)
+	if err != nil {
+		bccspConfig = nil
+	}
+
+	msp.SetupBCCSPKeystoreConfig(bccspConfig, viper.GetString("peer.mspConfigPath")+"/keystore")
+
+	err = factory.InitFactories(bccspConfig)
+	if err != nil {
+		panic(fmt.Errorf("Could not initialize BCCSP Factories [%s]", err))
+	}
 }

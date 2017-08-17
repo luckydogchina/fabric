@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package comm
@@ -25,6 +15,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/util"
 	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/op/go-logging"
+	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 )
 
@@ -206,6 +197,7 @@ func newConnection(cl proto.GossipClient, c *grpc.ClientConn, cs proto.Gossip_Go
 }
 
 type connection struct {
+	cancel       context.CancelFunc
 	info         *proto.ConnectionInfo
 	outBuff      chan *msgSending
 	logger       *logging.Logger                 // logger
@@ -241,6 +233,10 @@ func (conn *connection) close() {
 		conn.conn.Close()
 	}
 
+	if conn.cancel != nil {
+		conn.cancel()
+	}
+
 	conn.Unlock()
 
 }
@@ -254,7 +250,9 @@ func (conn *connection) send(msg *proto.SignedGossipMessage, onErr func(error)) 
 	defer conn.Unlock()
 
 	if len(conn.outBuff) == util.GetIntOrDefault("peer.gossip.sendBuffSize", defSendBuffSize) {
-		go onErr(errSendOverflow)
+		if conn.logger.IsEnabledFor(logging.DEBUG) {
+			conn.logger.Debug("Buffer to", conn.info.Endpoint, "overflowed, dropping message", msg.String())
+		}
 		return
 	}
 

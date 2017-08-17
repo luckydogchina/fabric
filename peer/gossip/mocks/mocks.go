@@ -56,14 +56,6 @@ func (m *ChannelPolicyManager) Manager(path []string) (policies.Manager, bool) {
 	panic("Not implemented")
 }
 
-func (m *ChannelPolicyManager) BasePath() string {
-	panic("Not implemented")
-}
-
-func (m *ChannelPolicyManager) PolicyNames() []string {
-	panic("Not implemented")
-}
-
 type Policy struct {
 	Deserializer msp.IdentityDeserializer
 }
@@ -148,14 +140,6 @@ func (id *Identity) Verify(msg []byte, sig []byte) error {
 	}
 
 	return errors.New("Invalid Signature")
-}
-
-func (id *Identity) VerifyOpts(msg []byte, sig []byte, opts msp.SignatureOpts) error {
-	return nil
-}
-
-func (id *Identity) VerifyAttributes(proof []byte, spec *msp.AttributeProofSpec) error {
-	return nil
 }
 
 func (id *Identity) Serialize() ([]byte, error) {

@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package pull
@@ -59,9 +49,9 @@ type MembershipService interface {
 type Config struct {
 	ID                string
 	PullInterval      time.Duration // Duration between pull invocations
-	PeerCountToSelect int           // Number of peers to initiate pull with
-	Tag               proto.GossipMessage_Tag
 	Channel           common.ChainID
+	PeerCountToSelect int // Number of peers to initiate pull with
+	Tag               proto.GossipMessage_Tag
 	MsgType           proto.PullMsgType
 }
 
@@ -154,7 +144,6 @@ func (p *pullMediatorImpl) HandleMessage(m proto.ReceivedMessage) {
 		return
 	}
 	msg := m.GetGossipMessage()
-
 	msgType := msg.GetPullMsgType()
 	if msgType != p.config.MsgType {
 		return
@@ -262,8 +251,13 @@ func (p *pullMediatorImpl) Hello(dest string, nonce uint64) {
 		},
 	}
 
-	p.logger.Debug("Sending hello to", dest)
-	p.Sndr.Send(helloMsg.NoopSign(), p.peersWithEndpoints(dest)...)
+	p.logger.Debug("Sending", p.config.MsgType, "hello to", dest)
+	sMsg, err := helloMsg.NoopSign()
+	if err != nil {
+		p.logger.Error("Failed creating SignedGossipMessage:", err)
+		return
+	}
+	p.Sndr.Send(sMsg, p.peersWithEndpoints(dest)...)
 }
 
 // SendDigest sends a digest to a remote PullEngine.
@@ -281,7 +275,8 @@ func (p *pullMediatorImpl) SendDigest(digest []string, nonce uint64, context int
 			},
 		},
 	}
-	p.logger.Debug("Sending digest", digMsg.GetDataDig().Digests)
+	remotePeer := context.(proto.ReceivedMessage).GetConnectionInfo()
+	p.logger.Debug("Sending", p.config.MsgType, "digest:", digMsg.GetDataDig().Digests, "to", remotePeer)
 	context.(proto.ReceivedMessage).Respond(digMsg)
 }
 
@@ -301,7 +296,12 @@ func (p *pullMediatorImpl) SendReq(dest string, items []string, nonce uint64) {
 		},
 	}
 	p.logger.Debug("Sending", req, "to", dest)
-	p.Sndr.Send(req.NoopSign(), p.peersWithEndpoints(dest)...)
+	sMsg, err := req.NoopSign()
+	if err != nil {
+		p.logger.Warning("Failed creating SignedGossipMessage:", err)
+		return
+	}
+	p.Sndr.Send(sMsg, p.peersWithEndpoints(dest)...)
 }
 
 // SendRes sends an array of items to a remote PullEngine identified by a context.
@@ -314,7 +314,6 @@ func (p *pullMediatorImpl) SendRes(items []string, context interface{}, nonce ui
 			items2return = append(items2return, msg.Envelope)
 		}
 	}
-
 	returnedUpdate := &proto.GossipMessage{
 		Channel: p.config.Channel,
 		Tag:     p.config.Tag,
@@ -327,7 +326,8 @@ func (p *pullMediatorImpl) SendRes(items []string, context interface{}, nonce ui
 			},
 		},
 	}
-	p.logger.Debug("Sending", returnedUpdate, "to")
+	remotePeer := context.(proto.ReceivedMessage).GetConnectionInfo()
+	p.logger.Debug("Sending", len(returnedUpdate.GetDataUpdate().Data), p.config.MsgType, "items to", remotePeer)
 	context.(proto.ReceivedMessage).Respond(returnedUpdate)
 }
 

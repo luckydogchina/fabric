@@ -72,6 +72,10 @@ func TestToString(t *testing.T) {
 		},
 	}
 	assert.NotContains(t, fmt.Sprintf("%v", sMsg), "2")
+	sMsg.GetDataMsg().Payload = nil
+	assert.NotPanics(t, func() {
+		_ = sMsg.String()
+	})
 
 	sMsg = &SignedGossipMessage{
 		GossipMessage: &GossipMessage{
@@ -150,8 +154,8 @@ func TestAliveMessageNoActionTaken(t *testing.T) {
 				PkiId:    []byte{17},
 			},
 			Timestamp: &PeerTime{
-				IncNumber: 1,
-				SeqNum:    1,
+				IncNum: 1,
+				SeqNum: 1,
 			},
 			Identity: []byte("peerID1"),
 		},
@@ -165,8 +169,8 @@ func TestAliveMessageNoActionTaken(t *testing.T) {
 				PkiId:    []byte{15},
 			},
 			Timestamp: &PeerTime{
-				IncNumber: 2,
-				SeqNum:    2,
+				IncNum: 2,
+				SeqNum: 2,
 			},
 			Identity: []byte("peerID1"),
 		},
@@ -226,8 +230,8 @@ func TestAliveMessageInvalidation(t *testing.T) {
 				PkiId:    []byte{17},
 			},
 			Timestamp: &PeerTime{
-				IncNumber: 1,
-				SeqNum:    1,
+				IncNum: 1,
+				SeqNum: 1,
 			},
 			Identity: []byte("peerID1"),
 		},
@@ -241,8 +245,8 @@ func TestAliveMessageInvalidation(t *testing.T) {
 				PkiId:    []byte{17},
 			},
 			Timestamp: &PeerTime{
-				IncNumber: 2,
-				SeqNum:    2,
+				IncNum: 2,
+				SeqNum: 2,
 			},
 			Identity: []byte("peerID1"),
 		},
@@ -256,8 +260,8 @@ func TestAliveMessageInvalidation(t *testing.T) {
 				PkiId:    []byte{17},
 			},
 			Timestamp: &PeerTime{
-				IncNumber: 1,
-				SeqNum:    2,
+				IncNum: 1,
+				SeqNum: 2,
 			},
 			Identity: []byte("peerID1"),
 		},
@@ -365,8 +369,8 @@ func TestCheckGossipMessageTypes(t *testing.T) {
 				Endpoint: "localhost",
 			},
 			Timestamp: &PeerTime{
-				SeqNum:    1,
-				IncNumber: 1,
+				SeqNum: 1,
+				IncNum: 1,
 			},
 		},
 	})
@@ -697,18 +701,14 @@ func TestGossipMessageSign(t *testing.T) {
 		DataMsg: &DataMessage{},
 	})
 
-	signedMsg := msg.Sign(idSigner)
+	signedMsg, _ := msg.Sign(idSigner)
 
 	// Since checking the identity signer, signature will be same as the payload
 	assert.Equal(t, signedMsg.Payload, signedMsg.Signature)
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Using error signer should lead to the panic")
-		}
-	}()
-
-	_ = msg.Sign(errSigner)
+	env, err := msg.Sign(errSigner)
+	assert.Error(t, err)
+	assert.Nil(t, env)
 }
 
 func TestEnvelope_NoopSign(t *testing.T) {
@@ -717,10 +717,11 @@ func TestEnvelope_NoopSign(t *testing.T) {
 		DataMsg: &DataMessage{},
 	})
 
-	signedMsg := msg.NoopSign()
+	signedMsg, err := msg.NoopSign()
 
 	// Since checking the identity signer, signature will be same as the payload
 	assert.Nil(t, signedMsg.Signature)
+	assert.NoError(t, err)
 }
 
 func TestSignedGossipMessage_Verify(t *testing.T) {
@@ -827,20 +828,20 @@ func leadershipMessage(incNum uint64, seqNum uint64, pkid []byte) *GossipMessage
 			PkiId:         pkid,
 			IsDeclaration: false,
 			Timestamp: &PeerTime{
-				IncNumber: incNum,
-				SeqNum:    seqNum,
+				IncNum: incNum,
+				SeqNum: seqNum,
 			},
 		},
 	}
 }
 
-func stateInfoMessage(incNumber uint64, seqNum uint64, pkid []byte, mac []byte) *GossipMessage_StateInfo {
+func stateInfoMessage(incNum uint64, seqNum uint64, pkid []byte, mac []byte) *GossipMessage_StateInfo {
 	return &GossipMessage_StateInfo{
 		StateInfo: &StateInfo{
 			Metadata: []byte{},
 			Timestamp: &PeerTime{
-				IncNumber: incNumber,
-				SeqNum:    seqNum,
+				IncNum: incNum,
+				SeqNum: seqNum,
 			},
 			PkiId:       pkid,
 			Channel_MAC: mac,

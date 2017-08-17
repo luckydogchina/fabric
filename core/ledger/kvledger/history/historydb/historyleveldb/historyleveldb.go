@@ -32,7 +32,6 @@ import (
 
 var logger = flogging.MustGetLogger("historyleveldb")
 
-var compositeKeySep = []byte{0x00}
 var savePointKey = []byte{0x00}
 var emptyValue = []byte{}
 
@@ -209,7 +208,8 @@ func (historyDB *historyDB) ShouldRecover(lastAvailableBlock uint64) (bool, uint
 }
 
 // CommitLostBlock implements method in interface kvledger.Recoverer
-func (historyDB *historyDB) CommitLostBlock(block *common.Block) error {
+func (historyDB *historyDB) CommitLostBlock(blockAndPvtdata *ledger.BlockAndPvtData) error {
+	block := blockAndPvtdata.Block
 	if err := historyDB.Commit(block); err != nil {
 		return err
 	}

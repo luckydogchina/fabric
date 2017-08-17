@@ -18,15 +18,11 @@ package example;
 
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.hyperledger.fabric.shim.ChaincodeHelper.newBadRequestResponse;
-import static org.hyperledger.fabric.shim.ChaincodeHelper.newInternalServerErrorResponse;
-import static org.hyperledger.fabric.shim.ChaincodeHelper.newSuccessResponse;
 
 import javax.json.Json;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.hyperledger.fabric.protos.peer.ProposalResponsePackage.Response;
 import org.hyperledger.fabric.shim.ChaincodeBase;
 import org.hyperledger.fabric.shim.ChaincodeStub;
 
@@ -42,14 +38,10 @@ public class Example02 extends ChaincodeBase {
 			case "init":
 				return init(stub, stub.getParameters().stream().toArray(String[]::new));
 			default:
-				return newBadRequestResponse(format("Unknown function: %s", function));
+				return newErrorResponse(format("Unknown function: %s", function));
 			}
-		} catch (NumberFormatException e) {
-			return newBadRequestResponse(e.toString());
-		} catch (IllegalArgumentException e) {
-			return newBadRequestResponse(e.getMessage());
 		} catch (Throwable e) {
-			return newInternalServerErrorResponse(e);
+			return newErrorResponse(e);
 		}
 	}
 
@@ -68,14 +60,10 @@ public class Example02 extends ChaincodeBase {
 			case "query":
 				return query(stub, args);
 			default:
-				return newBadRequestResponse(format("Unknown function: %s", function));
+				return newErrorResponse(format("Unknown function: %s", function));
 			}
-		} catch (NumberFormatException e) {
-			return newBadRequestResponse(e.toString());
-		} catch (IllegalArgumentException e) {
-			return newBadRequestResponse(e.getMessage());
 		} catch (Throwable e) {
-			return newInternalServerErrorResponse(e);
+			return newErrorResponse(e);
 		}
 
 	}
@@ -118,7 +106,7 @@ public class Example02 extends ChaincodeBase {
 		}
 
 		// perform the transfer
-		log.info(format("Tranferring %d holdings from %s to %s", transferAmount, fromKey, toKey));
+		log.info(format("Transferring %d holdings from %s to %s", transferAmount, fromKey, toKey));
 		int newFromAccountBalance = fromAccountBalance - transferAmount;
 		int newToAccountBalance = toAccountBalance + transferAmount;
 		log.info(format("New holding values will be: %s = %d, %s = %d", fromKey, newFromAccountBalance, toKey, newToAccountBalance));

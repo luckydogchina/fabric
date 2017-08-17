@@ -37,37 +37,43 @@ import (
 	"github.com/hyperledger/fabric/core/common/sysccprovider"
 	cutils "github.com/hyperledger/fabric/core/container/util"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
+	per "github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/policy"
 	"github.com/hyperledger/fabric/core/scc/lscc"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/msp/mgmt/testtools"
 	"github.com/hyperledger/fabric/protos/common"
+	mspproto "github.com/hyperledger/fabric/protos/msp"
 	"github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protos/utils"
 	"github.com/stretchr/testify/assert"
 )
 
-func createTx() (*common.Envelope, *peer.ProposalResponse, error) {
+func createTx(endorsedByDuplicatedIdentity bool) (*common.Envelope, error) {
 	ccid := &peer.ChaincodeID{Name: "foo", Version: "v1"}
 	cis := &peer.ChaincodeInvocationSpec{ChaincodeSpec: &peer.ChaincodeSpec{ChaincodeId: ccid}}
 
 	prop, _, err := utils.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, sid)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	presp, err := utils.CreateProposalResponse(prop.Header, prop.Payload, &peer.Response{Status: 200}, []byte("res"), nil, ccid, nil, id)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	env, err := utils.CreateSignedTx(prop, id, presp)
+	var env *common.Envelope
+	if endorsedByDuplicatedIdentity {
+		env, err = utils.CreateSignedTx(prop, id, presp, presp)
+	} else {
+		env, err = utils.CreateSignedTx(prop, id, presp)
+	}
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	return env, presp, err
+	return env, err
 }
 
 func processSignedCDS(cds *peer.ChaincodeDeploymentSpec, policy *common.SignaturePolicyEnvelope) ([]byte, error) {
@@ -131,11 +137,18 @@ func createCCDataRWset(nameK, nameV, version string, policy []byte) ([]byte, err
 
 	rwsetBuilder := rwsetutil.NewRWSetBuilder()
 	rwsetBuilder.AddToWriteSet("lscc", nameK, cdbytes)
-	rwset := rwsetBuilder.GetTxReadWriteSet()
-	return rwset.ToProtoBytes()
+	sr, err := rwsetBuilder.GetTxSimulationResults()
+	if err != nil {
+		return nil, err
+	}
+	return sr.GetPubSimulationBytes()
 }
 
 func createLSCCTx(ccname, ccver, f string, res []byte) (*common.Envelope, error) {
+	return createLSCCTxPutCds(ccname, ccver, f, res, nil, true)
+}
+
+func createLSCCTxPutCds(ccname, ccver, f string, res, cdsbytes []byte, putcds bool) (*common.Envelope, error) {
 	cds := &peer.ChaincodeDeploymentSpec{
 		ChaincodeSpec: &peer.ChaincodeSpec{
 			ChaincodeId: &peer.ChaincodeID{
@@ -151,14 +164,30 @@ func createLSCCTx(ccname, ccver, f string, res []byte) (*common.Envelope, error)
 		return nil, err
 	}
 
-	cis := &peer.ChaincodeInvocationSpec{
-		ChaincodeSpec: &peer.ChaincodeSpec{
-			ChaincodeId: &peer.ChaincodeID{Name: "lscc"},
-			Input: &peer.ChaincodeInput{
-				Args: [][]byte{[]byte(f), []byte("barf"), cdsBytes},
+	var cis *peer.ChaincodeInvocationSpec
+	if putcds {
+		if cdsbytes != nil {
+			cdsBytes = cdsbytes
+		}
+		cis = &peer.ChaincodeInvocationSpec{
+			ChaincodeSpec: &peer.ChaincodeSpec{
+				ChaincodeId: &peer.ChaincodeID{Name: "lscc"},
+				Input: &peer.ChaincodeInput{
+					Args: [][]byte{[]byte(f), []byte("barf"), cdsBytes},
+				},
+				Type: peer.ChaincodeSpec_GOLANG,
 			},
-			Type: peer.ChaincodeSpec_GOLANG,
-		},
+		}
+	} else {
+		cis = &peer.ChaincodeInvocationSpec{
+			ChaincodeSpec: &peer.ChaincodeSpec{
+				ChaincodeId: &peer.ChaincodeID{Name: "lscc"},
+				Input: &peer.ChaincodeInput{
+					Args: [][]byte{[]byte(f), []byte("barf")},
+				},
+				Type: peer.ChaincodeSpec_GOLANG,
+			},
+		}
 	}
 
 	prop, _, err := utils.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, sid)
@@ -196,6 +225,35 @@ func getSignedByMSPMemberPolicy(mspID string) ([]byte, error) {
 	return b, err
 }
 
+func getSignedByOneMemberTwicePolicy(mspID string) ([]byte, error) {
+	principal := &mspproto.MSPPrincipal{
+		PrincipalClassification: mspproto.MSPPrincipal_ROLE,
+		Principal:               utils.MarshalOrPanic(&mspproto.MSPRole{Role: mspproto.MSPRole_MEMBER, MspIdentifier: mspID})}
+
+	p := &common.SignaturePolicyEnvelope{
+		Version:    0,
+		Rule:       cauthdsl.NOutOf(2, []*common.SignaturePolicy{cauthdsl.SignedBy(0), cauthdsl.SignedBy(0)}),
+		Identities: []*mspproto.MSPPrincipal{principal},
+	}
+	b, err := utils.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("Could not marshal policy, err %s", err)
+	}
+
+	return b, err
+}
+
+func getSignedByMSPAdminPolicy(mspID string) ([]byte, error) {
+	p := cauthdsl.SignedByMspAdmin(mspID)
+
+	b, err := utils.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("Could not marshal policy, err %s", err)
+	}
+
+	return b, err
+}
+
 func TestInvoke(t *testing.T) {
 	v := new(ValidatorOneValidSignature)
 	stub := shim.NewMockStub("validatoronevalidsignature", v)
@@ -206,13 +264,45 @@ func TestInvoke(t *testing.T) {
 		t.Fatalf("vscc invoke should have failed")
 	}
 
+	// not enough args
 	args = [][]byte{[]byte("dv"), []byte("tx")}
 	args[1] = nil
 	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
 		t.Fatalf("vscc invoke should have failed")
 	}
 
-	tx, _, err := createTx()
+	// nil args
+	args = [][]byte{nil, nil, nil}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	// nil args
+	args = [][]byte{[]byte("a"), []byte("a"), nil}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	// broken Envelope
+	args = [][]byte{[]byte("a"), []byte("a"), []byte("a")}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	// (still) broken Envelope
+	args = [][]byte{[]byte("a"), utils.MarshalOrPanic(&common.Envelope{Payload: []byte("barf")}), []byte("a")}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	// (still) broken Envelope
+	b := utils.MarshalOrPanic(&common.Envelope{Payload: utils.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: []byte("barf")}})})
+	args = [][]byte{[]byte("a"), b, []byte("a")}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	tx, err := createTx(false)
 	if err != nil {
 		t.Fatalf("createTx returned err %s", err)
 	}
@@ -222,12 +312,32 @@ func TestInvoke(t *testing.T) {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
 
-	// good path: signed by the right MSP
+	// broken policy
+	args = [][]byte{[]byte("dv"), envBytes, []byte("barf")}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
 	policy, err := getSignedByMSPMemberPolicy(mspid)
 	if err != nil {
 		t.Fatalf("failed getting policy, err %s", err)
 	}
 
+	// broken type
+	b = utils.MarshalOrPanic(&common.Envelope{Payload: utils.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_ORDERER_TRANSACTION)})}})})
+	args = [][]byte{[]byte("dv"), b, policy}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	// broken tx payload
+	b = utils.MarshalOrPanic(&common.Envelope{Payload: utils.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_ORDERER_TRANSACTION)})}})})
+	args = [][]byte{[]byte("dv"), b, policy}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	// good path: signed by the right MSP
 	args = [][]byte{[]byte("dv"), envBytes, policy}
 	res := stub.MockInvoke("1", args)
 	if res.Status != shim.OK {
@@ -243,6 +353,24 @@ func TestInvoke(t *testing.T) {
 	args = [][]byte{[]byte("dv"), envBytes, policy}
 	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
 		t.Fatalf("vscc invoke should have failed")
+	}
+
+	// bad path: signed by duplicated MSP identity
+	policy, err = getSignedByOneMemberTwicePolicy(mspid)
+	if err != nil {
+		t.Fatalf("failed getting policy, err %s", err)
+	}
+	tx, err = createTx(true)
+	if err != nil {
+		t.Fatalf("createTx returned err %s", err)
+	}
+	envBytes, err = utils.GetBytesEnvelope(tx)
+	if err != nil {
+		t.Fatalf("GetBytesEnvelope returned err %s", err)
+	}
+	args = [][]byte{[]byte("dv"), envBytes, policy}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK || res.Message != DUPLICATED_IDENTITY_ERROR {
+		t.Fatalf("vscc invoke should have failed due to policy evaluation failure caused by duplicated identity")
 	}
 }
 
@@ -336,11 +464,12 @@ func TestRWSetTooBig(t *testing.T) {
 	rwsetBuilder := rwsetutil.NewRWSetBuilder()
 	rwsetBuilder.AddToWriteSet("lscc", ccname, cdbytes)
 	rwsetBuilder.AddToWriteSet("lscc", "spurious", []byte("spurious"))
-	rwset := rwsetBuilder.GetTxReadWriteSet()
-	res, err := rwset.ToProtoBytes()
-	assert.NoError(t, err)
 
-	tx, err := createLSCCTx(ccname, ccver, lscc.DEPLOY, res)
+	sr, err := rwsetBuilder.GetTxSimulationResults()
+	assert.NoError(t, err)
+	srBytes, err := sr.GetPubSimulationBytes()
+	assert.NoError(t, err)
+	tx, err := createLSCCTx(ccname, ccver, lscc.DEPLOY, srBytes)
 	if err != nil {
 		t.Fatalf("createTx returned err %s", err)
 	}
@@ -420,11 +549,67 @@ func TestValidateDeployFail(t *testing.T) {
 
 	rwsetBuilder := rwsetutil.NewRWSetBuilder()
 	rwsetBuilder.AddToWriteSet("lscc", ccname, []byte("barf"))
-	rwset := rwsetBuilder.GetTxReadWriteSet()
-	resBogus, err := rwset.ToProtoBytes()
+	sr, err := rwsetBuilder.GetTxSimulationResults()
+	assert.NoError(t, err)
+	resBogusBytes, err := sr.GetPubSimulationBytes()
+	assert.NoError(t, err)
+	tx, err = createLSCCTx(ccname, ccver, lscc.DEPLOY, resBogusBytes)
+	if err != nil {
+		t.Fatalf("createTx returned err %s", err)
+	}
+
+	envBytes, err = utils.GetBytesEnvelope(tx)
+	if err != nil {
+		t.Fatalf("GetBytesEnvelope returned err %s", err)
+	}
+
+	// good path: signed by the right MSP
+	policy, err = getSignedByMSPMemberPolicy(mspid)
+	if err != nil {
+		t.Fatalf("failed getting policy, err %s", err)
+	}
+
+	args = [][]byte{[]byte("dv"), envBytes, policy}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	/**********************/
+	/* test bad LSCC args */
+	/**********************/
+
+	res, err := createCCDataRWset(ccname, ccname, ccver, nil)
 	assert.NoError(t, err)
 
-	tx, err = createLSCCTx(ccname, ccver, lscc.DEPLOY, resBogus)
+	tx, err = createLSCCTxPutCds(ccname, ccver, lscc.DEPLOY, res, nil, false)
+	if err != nil {
+		t.Fatalf("createTx returned err %s", err)
+	}
+
+	envBytes, err = utils.GetBytesEnvelope(tx)
+	if err != nil {
+		t.Fatalf("GetBytesEnvelope returned err %s", err)
+	}
+
+	// good path: signed by the right MSP
+	policy, err = getSignedByMSPMemberPolicy(mspid)
+	if err != nil {
+		t.Fatalf("failed getting policy, err %s", err)
+	}
+
+	args = [][]byte{[]byte("dv"), envBytes, policy}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	/**********************/
+	/* test bad LSCC args */
+	/**********************/
+
+	res, err = createCCDataRWset(ccname, ccname, ccver, nil)
+	assert.NoError(t, err)
+
+	tx, err = createLSCCTxPutCds(ccname, ccver, lscc.DEPLOY, res, []byte("barf"), true)
 	if err != nil {
 		t.Fatalf("createTx returned err %s", err)
 	}
@@ -449,10 +634,35 @@ func TestValidateDeployFail(t *testing.T) {
 	/* test bad cc version */
 	/***********************/
 
-	res, err := createCCDataRWset(ccname, ccname, ccver+".1", nil)
+	res, err = createCCDataRWset(ccname, ccname, ccver+".1", nil)
 	assert.NoError(t, err)
 
 	tx, err = createLSCCTx(ccname, ccver, lscc.DEPLOY, res)
+	if err != nil {
+		t.Fatalf("createTx returned err %s", err)
+	}
+
+	envBytes, err = utils.GetBytesEnvelope(tx)
+	if err != nil {
+		t.Fatalf("GetBytesEnvelope returned err %s", err)
+	}
+
+	// good path: signed by the right MSP
+	policy, err = getSignedByMSPMemberPolicy(mspid)
+	if err != nil {
+		t.Fatalf("failed getting policy, err %s", err)
+	}
+
+	args = [][]byte{[]byte("dv"), envBytes, policy}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
+	}
+
+	/*************/
+	/* bad rwset */
+	/*************/
+
+	tx, err = createLSCCTx(ccname, ccver, lscc.DEPLOY, []byte("barf"))
 	if err != nil {
 		t.Fatalf("createTx returned err %s", err)
 	}
@@ -541,11 +751,11 @@ func TestValidateDeployFail(t *testing.T) {
 	rwsetBuilder = rwsetutil.NewRWSetBuilder()
 	rwsetBuilder.AddToWriteSet("lscc", ccname, cdbytes)
 	rwsetBuilder.AddToWriteSet("bogusbogus", "key", []byte("val"))
-	rwset = rwsetBuilder.GetTxReadWriteSet()
-	res, err = rwset.ToProtoBytes()
+	sr, err = rwsetBuilder.GetTxSimulationResults()
 	assert.NoError(t, err)
-
-	tx, err = createLSCCTx(ccname, ccver, lscc.DEPLOY, res)
+	srBytes, err := sr.GetPubSimulationBytes()
+	assert.NoError(t, err)
+	tx, err = createLSCCTx(ccname, ccver, lscc.DEPLOY, srBytes)
 	if err != nil {
 		t.Fatalf("createTx returned err %s", err)
 	}
@@ -609,8 +819,9 @@ func TestAlreadyDeployed(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
-	if res := stublccc.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
 		t.FailNow()
 	}
@@ -637,6 +848,60 @@ func TestAlreadyDeployed(t *testing.T) {
 	args = [][]byte{[]byte("dv"), envBytes, policy}
 	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
 		t.Fatalf("vscc invocation should have failed")
+	}
+}
+
+func TestValidateDeployNoLedger(t *testing.T) {
+	v := new(ValidatorOneValidSignature)
+	stub := shim.NewMockStub("validatoronevalidsignature", v)
+
+	lccc := new(lscc.LifeCycleSysCC)
+	stublccc := shim.NewMockStub("lscc", lccc)
+
+	State := make(map[string]map[string][]byte)
+	State["lscc"] = stublccc.State
+	sysccprovider.RegisterSystemChaincodeProviderFactory(&scc.MocksccProviderFactory{QErr: fmt.Errorf("Simulated error")})
+	stub.MockPeerChaincode("lscc", stublccc)
+
+	r1 := stub.MockInit("1", [][]byte{})
+	if r1.Status != shim.OK {
+		fmt.Println("Init failed", string(r1.Message))
+		t.FailNow()
+	}
+
+	r := stublccc.MockInit("1", [][]byte{})
+	if r.Status != shim.OK {
+		fmt.Println("Init failed", string(r.Message))
+		t.FailNow()
+	}
+
+	ccname := "mycc"
+	ccver := "1"
+
+	defaultPolicy, err := getSignedByMSPAdminPolicy(mspid)
+	assert.NoError(t, err)
+	res, err := createCCDataRWset(ccname, ccname, ccver, defaultPolicy)
+	assert.NoError(t, err)
+
+	tx, err := createLSCCTx(ccname, ccver, lscc.DEPLOY, res)
+	if err != nil {
+		t.Fatalf("createTx returned err %s", err)
+	}
+
+	envBytes, err := utils.GetBytesEnvelope(tx)
+	if err != nil {
+		t.Fatalf("GetBytesEnvelope returned err %s", err)
+	}
+
+	// good path: signed by the right MSP
+	policy, err := getSignedByMSPMemberPolicy(mspid)
+	if err != nil {
+		t.Fatalf("failed getting policy, err %s", err)
+	}
+
+	args := [][]byte{[]byte("dv"), envBytes, policy}
+	if res := stub.MockInvoke("1", args); res.Status == shim.OK {
+		t.Fatalf("vscc invoke should have failed")
 	}
 }
 
@@ -667,7 +932,9 @@ func TestValidateDeployOK(t *testing.T) {
 	ccname := "mycc"
 	ccver := "1"
 
-	res, err := createCCDataRWset(ccname, ccname, ccver, nil)
+	defaultPolicy, err := getSignedByMSPAdminPolicy(mspid)
+	assert.NoError(t, err)
+	res, err := createCCDataRWset(ccname, ccname, ccver, defaultPolicy)
 	assert.NoError(t, err)
 
 	tx, err := createLSCCTx(ccname, ccver, lscc.DEPLOY, res)
@@ -871,8 +1138,9 @@ func TestValidateUpgradeOK(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
-	if res := stublccc.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
 		t.FailNow()
 	}
@@ -947,8 +1215,9 @@ func TestInvalidateUpgradeBadVersion(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
-	if res := stublccc.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
 		t.FailNow()
 	}
@@ -1023,8 +1292,9 @@ func TestValidateUpgradeWithPoliciesOK(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
-	if res := stublccc.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
 		t.FailNow()
 	}
@@ -1169,6 +1439,12 @@ func TestMain(m *testing.M) {
 	sysccprovider.RegisterSystemChaincodeProviderFactory(&scc.MocksccProviderFactory{})
 	policy.RegisterPolicyCheckerFactory(&mockPolicyCheckerFactory{})
 
+	mspGetter := func(cid string) []string {
+		return []string{"DEFAULT"}
+	}
+
+	per.MockSetMSPIDGetter(mspGetter)
+
 	var err error
 
 	// setup the MSP manager so that we can sign/verify
@@ -1207,6 +1483,9 @@ func TestMain(m *testing.M) {
 		fmt.Printf("Failure getting the msp identifier, err %s", err)
 		os.Exit(-1)
 	}
+
+	// also set the MSP for the "test" chain
+	mspmgmt.XXXSetMSPManager("mycc", mspmgmt.GetManagerForChain(util.GetTestChainID()))
 
 	os.Exit(m.Run())
 }

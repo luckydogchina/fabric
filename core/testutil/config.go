@@ -64,7 +64,7 @@ func SetupTestConfig() {
 	flag.Parse()
 
 	// Now set the configuration file
-	viper.SetEnvPrefix("HYPERLEDGER")
+	viper.SetEnvPrefix("CORE")
 	viper.AutomaticEnv()
 	replacer := strings.NewReplacer(".", "_")
 	viper.SetEnvKeyReplacer(replacer)
@@ -83,7 +83,7 @@ func SetupTestConfig() {
 
 	// Set the number of maxprocs
 	var numProcsDesired = viper.GetInt("peer.gomaxprocs")
-	configLogger.Debugf("setting Number of procs to %d, was %d\n", numProcsDesired, runtime.GOMAXPROCS(2))
+	configLogger.Debugf("setting Number of procs to %d, was %d\n", numProcsDesired, runtime.GOMAXPROCS(numProcsDesired))
 
 	// Init the BCCSP
 	var bccspConfig *factory.FactoryOpts

@@ -50,7 +50,7 @@ const (
 	//CHAINCODETABLE prefix for chaincode tables
 	CHAINCODETABLE = "chaincodes"
 
-	//chaincode lifecyle commands
+	//chaincode lifecycle commands
 
 	//INSTALL install command
 	INSTALL = "install"
@@ -82,7 +82,7 @@ const (
 
 //---------- the LSCC -----------------
 
-// LifeCycleSysCC implements chaincode lifecycle and policies aroud it
+// LifeCycleSysCC implements chaincode lifecycle and policies around it
 type LifeCycleSysCC struct {
 	// sccprovider is the interface with which we call
 	// methods of the system chaincode package without
@@ -138,7 +138,7 @@ func (t TXNotFoundErr) Error() string {
 	return fmt.Sprintf("transaction not found %s", string(t))
 }
 
-//InvalidDeploymentSpecErr invalide chaincode deployment spec error
+//InvalidDeploymentSpecErr invalid chaincode deployment spec error
 type InvalidDeploymentSpecErr string
 
 func (f InvalidDeploymentSpecErr) Error() string {
@@ -226,7 +226,14 @@ func (f InvalidCCOnFSError) Error() string {
 type InstantiationPolicyViolatedErr string
 
 func (f InstantiationPolicyViolatedErr) Error() string {
-	return "chaincode instantiation policy violated"
+	return fmt.Sprintf("chaincode instantiation policy violated(%s)", string(f))
+}
+
+//InstantiationPolicyMissing when no existing instantiation policy is found when upgrading CC
+type InstantiationPolicyMissing string
+
+func (f InstantiationPolicyMissing) Error() string {
+	return "instantiation policy missing"
 }
 
 //-------------- helper functions ------------------
@@ -472,17 +479,29 @@ func (lscc *LifeCycleSysCC) executeInstall(stub shim.ChaincodeStubInterface, ccb
 }
 
 // getInstantiationPolicy retrieves the instantiation policy from a SignedCDSPackage
-func (lscc *LifeCycleSysCC) getInstantiationPolicy(stub shim.ChaincodeStubInterface, ccpack ccprovider.CCPackage) ([]byte, error) {
-	//if ccpack is a SignedCDSPackage, evaluate submitter against instantiation policy
+func (lscc *LifeCycleSysCC) getInstantiationPolicy(channel string, ccpack ccprovider.CCPackage) ([]byte, error) {
+	var ip []byte
+	var err error
+	// if ccpack is a SignedCDSPackage, return its IP, otherwise use a default IP
 	sccpack, isSccpack := ccpack.(*ccprovider.SignedCDSPackage)
 	if isSccpack {
-		ip := sccpack.GetInstantiationPolicy()
+		ip = sccpack.GetInstantiationPolicy()
 		if ip == nil {
 			return nil, fmt.Errorf("Instantiation policy cannot be null for a SignedCCDeploymentSpec")
 		}
-		return ip, nil
+	} else {
+		// the default instantiation policy allows any of the channel MSP admins
+		// to be able to instantiate
+		mspids := peer.GetMSPIDs(channel)
+
+		p := cauthdsl.SignedByAnyAdmin(mspids)
+		ip, err = utils.Marshal(p)
+		if err != nil {
+			return nil, fmt.Errorf("Error marshalling default instantiation policy")
+		}
+
 	}
-	return nil, nil
+	return ip, nil
 }
 
 // checkInstantiationPolicy evaluates an instantiation policy against a signed proposal
@@ -523,7 +542,7 @@ func (lscc *LifeCycleSysCC) checkInstantiationPolicy(stub shim.ChaincodeStubInte
 	}}
 	err = instPol.Evaluate(sd)
 	if err != nil {
-		return InstantiationPolicyViolatedErr("")
+		return InstantiationPolicyViolatedErr(err.Error())
 	}
 	return nil
 }
@@ -560,7 +579,7 @@ func (lscc *LifeCycleSysCC) executeDeploy(stub shim.ChaincodeStubInterface, chai
 		return nil, fmt.Errorf("cannot get package for the chaincode to be instantiated (%s:%s)-%s", cds.ChaincodeSpec.ChaincodeId.Name, cds.ChaincodeSpec.ChaincodeId.Version, err)
 	}
 
-	//this is guranteed to be not nil
+	//this is guarantees to be not nil
 	cd := ccpack.GetChaincodeData()
 
 	//retain chaincode specific data and fill channel specific ones
@@ -569,15 +588,13 @@ func (lscc *LifeCycleSysCC) executeDeploy(stub shim.ChaincodeStubInterface, chai
 	cd.Policy = policy
 
 	// retrieve and evaluate instantiation policy
-	cd.InstantiationPolicy, err = lscc.getInstantiationPolicy(stub, ccpack)
+	cd.InstantiationPolicy, err = lscc.getInstantiationPolicy(chainname, ccpack)
 	if err != nil {
 		return nil, err
 	}
-	if cd.InstantiationPolicy != nil {
-		err = lscc.checkInstantiationPolicy(stub, chainname, cd.InstantiationPolicy)
-		if err != nil {
-			return nil, err
-		}
+	err = lscc.checkInstantiationPolicy(stub, chainname, cd.InstantiationPolicy)
+	if err != nil {
+		return nil, err
 	}
 
 	err = lscc.createChaincode(stub, cd)
@@ -625,11 +642,12 @@ func (lscc *LifeCycleSysCC) executeUpgrade(stub shim.ChaincodeStubInterface, cha
 	}
 
 	//do not upgrade if instantiation policy is violated
-	if cd.InstantiationPolicy != nil {
-		err = lscc.checkInstantiationPolicy(stub, chainName, cd.InstantiationPolicy)
-		if err != nil {
-			return nil, err
-		}
+	if cd.InstantiationPolicy == nil {
+		return nil, InstantiationPolicyMissing("")
+	}
+	err = lscc.checkInstantiationPolicy(stub, chainName, cd.InstantiationPolicy)
+	if err != nil {
+		return nil, err
 	}
 
 	ccpack, err := ccprovider.GetChaincodeFromFS(chaincodeName, cds.ChaincodeSpec.ChaincodeId.Version)
@@ -646,15 +664,13 @@ func (lscc *LifeCycleSysCC) executeUpgrade(stub shim.ChaincodeStubInterface, cha
 	cd.Policy = policy
 
 	// retrieve and evaluate new instantiation policy
-	cd.InstantiationPolicy, err = lscc.getInstantiationPolicy(stub, ccpack)
+	cd.InstantiationPolicy, err = lscc.getInstantiationPolicy(chainName, ccpack)
 	if err != nil {
 		return nil, err
 	}
-	if cd.InstantiationPolicy != nil {
-		err = lscc.checkInstantiationPolicy(stub, chainName, cd.InstantiationPolicy)
-		if err != nil {
-			return nil, err
-		}
+	err = lscc.checkInstantiationPolicy(stub, chainName, cd.InstantiationPolicy)
+	if err != nil {
+		return nil, err
 	}
 
 	err = lscc.upgradeChaincode(stub, cd)
@@ -705,7 +721,7 @@ func (lscc *LifeCycleSysCC) Invoke(stub shim.ChaincodeStubInterface) pb.Response
 
 		// 2. check local MSP Admins policy
 		if err = lscc.policyChecker.CheckPolicyNoChannel(mgmt.Admins, sp); err != nil {
-			return shim.Error(fmt.Sprintf("Authorization for INSTALL on %s has been denied with error %s", args[1], err))
+			return shim.Error(fmt.Sprintf("Authorization for INSTALL has been denied (error-%s)", err))
 		}
 
 		depSpec := args[1]
@@ -723,7 +739,7 @@ func (lscc *LifeCycleSysCC) Invoke(stub shim.ChaincodeStubInterface) pb.Response
 		// TODO: add access control check
 		// once the instantiation process will be completed.
 
-		//chain the chaincode shoud be associated with. It
+		//chain the chaincode should be associated with. It
 		//should be created with a register call
 		chainname := string(args[1])
 
@@ -741,7 +757,11 @@ func (lscc *LifeCycleSysCC) Invoke(stub shim.ChaincodeStubInterface) pb.Response
 		if len(args) > 3 && len(args[3]) > 0 {
 			policy = args[3]
 		} else {
-			policy = cauthdsl.SignedByAnyMember(peer.GetMSPIDs(chainname))
+			p := cauthdsl.SignedByAnyMember(peer.GetMSPIDs(chainname))
+			policy, err = utils.Marshal(p)
+			if err != nil {
+				return shim.Error(err.Error())
+			}
 		}
 
 		var escc []byte
@@ -790,7 +810,11 @@ func (lscc *LifeCycleSysCC) Invoke(stub shim.ChaincodeStubInterface) pb.Response
 		if len(args) > 3 && len(args[3]) > 0 {
 			policy = args[3]
 		} else {
-			policy = cauthdsl.SignedByAnyMember(peer.GetMSPIDs(chainname))
+			p := cauthdsl.SignedByAnyMember(peer.GetMSPIDs(chainname))
+			policy, err = utils.Marshal(p)
+			if err != nil {
+				return shim.Error(err.Error())
+			}
 		}
 
 		var escc []byte

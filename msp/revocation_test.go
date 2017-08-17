@@ -17,31 +17,25 @@ limitations under the License.
 package msp
 
 import (
+	"path/filepath"
 	"testing"
 
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/protos/msp"
+	"github.com/op/go-logging"
 	"github.com/stretchr/testify/assert"
 )
 
-func getRevocationMSP(t *testing.T) MSP {
+func init() {
+	logging.SetLevel(logging.DEBUG, "msp/identity")
+}
+
+func TestRevocation(t *testing.T) {
 	// testdata/revocation
 	// 1) a key and a signcert (used to populate the default signing identity);
 	// 2) cacert is the CA that signed the intermediate;
 	// 3) a revocation list that revokes signcert
-	conf, err := GetLocalMspConfig("testdata/revocation", nil, "DEFAULT")
-	assert.NoError(t, err)
-
-	thisMSP, err := NewBccspMsp()
-	assert.NoError(t, err)
-
-	err = thisMSP.Setup(conf)
-	assert.NoError(t, err)
-
-	return thisMSP
-}
-
-func TestRevocation(t *testing.T) {
-	thisMSP := getRevocationMSP(t)
+	thisMSP := getLocalMSP(t, "testdata/revocation")
 
 	id, err := thisMSP.GetDefaultSigningIdentity()
 	assert.NoError(t, err)
@@ -49,10 +43,26 @@ func TestRevocation(t *testing.T) {
 	// the certificate associated to this id is revoked and so validation should fail!
 	err = id.Validate()
 	assert.Error(t, err)
+
+	// This MSP is identical to the previous one, with only 1 difference:
+	// the signature on the CRL is invalid
+	thisMSP = getLocalMSP(t, "testdata/revocation2")
+
+	id, err = thisMSP.GetDefaultSigningIdentity()
+	assert.NoError(t, err)
+
+	// the certificate associated to this id is revoked but the signature on the CRL is invalid
+	// so validation should succeed
+	err = id.Validate()
+	assert.NoError(t, err, "Identity found revoked although the signature over the CRL is invalid")
 }
 
 func TestIdentityPolicyPrincipalAgainstRevokedIdentity(t *testing.T) {
-	thisMSP := getRevocationMSP(t)
+	// testdata/revocation
+	// 1) a key and a signcert (used to populate the default signing identity);
+	// 2) cacert is the CA that signed the intermediate;
+	// 3) a revocation list that revokes signcert
+	thisMSP := getLocalMSP(t, "testdata/revocation")
 
 	id, err := thisMSP.GetDefaultSigningIdentity()
 	assert.NoError(t, err)
@@ -66,4 +76,26 @@ func TestIdentityPolicyPrincipalAgainstRevokedIdentity(t *testing.T) {
 
 	err = id.SatisfiesPrincipal(principal)
 	assert.Error(t, err)
+}
+
+func TestRevokedIntermediateCA(t *testing.T) {
+	// testdata/revokedica
+	// 1) a key and a signcert (used to populate the default signing identity);
+	// 2) cacert is the CA that signed the intermediate;
+	// 3) a revocation list that revokes the intermediate CA cert
+	dir := "testdata/revokedica"
+	conf, err := GetLocalMspConfig(dir, nil, "DEFAULT")
+	assert.NoError(t, err)
+
+	thisMSP, err := NewBccspMsp()
+	assert.NoError(t, err)
+	ks, err := sw.NewFileBasedKeyStore(nil, filepath.Join(dir, "keystore"), true)
+	assert.NoError(t, err)
+	csp, err := sw.New(256, "SHA2", ks)
+	assert.NoError(t, err)
+	thisMSP.(*bccspmsp).bccsp = csp
+
+	err = thisMSP.Setup(conf)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "CA Certificate is not valid, ")
 }

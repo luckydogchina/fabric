@@ -17,10 +17,10 @@ limitations under the License.
 package msp
 
 import (
-	"fmt"
-	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -28,17 +28,7 @@ func TestBadConfigOU(t *testing.T) {
 	// testdata/badconfigou:
 	// the configuration is such that only identities
 	// with OU=COP2 and signed by the root ca should be validated
-	conf, err := GetLocalMspConfig("testdata/badconfigou", nil, "DEFAULT")
-	if err != nil {
-		fmt.Printf("Setup should have succeeded, got err %s instead", err)
-		os.Exit(-1)
-	}
-
-	thisMSP, err := NewBccspMsp()
-	assert.NoError(t, err)
-
-	err = thisMSP.Setup(conf)
-	assert.NoError(t, err)
+	thisMSP := getLocalMSP(t, "testdata/badconfigou")
 
 	id, err := thisMSP.GetDefaultSigningIdentity()
 	assert.NoError(t, err)
@@ -61,4 +51,31 @@ func TestBadConfigOUCert(t *testing.T) {
 
 	err = thisMSP.Setup(conf)
 	assert.Error(t, err)
+}
+
+func TestValidateIntermediateConfigOU(t *testing.T) {
+	// testdata/external:
+	// the configuration is such that only identities with
+	// OU=Hyperledger Testing and signed by the intermediate ca should be validated
+	thisMSP := getLocalMSP(t, "testdata/external")
+
+	id, err := thisMSP.GetDefaultSigningIdentity()
+	assert.NoError(t, err)
+
+	err = id.Validate()
+	assert.NoError(t, err)
+
+	conf, err := GetLocalMspConfig("testdata/external", nil, "DEFAULT")
+	assert.NoError(t, err)
+
+	thisMSP, err = NewBccspMsp()
+	assert.NoError(t, err)
+	ks, err := sw.NewFileBasedKeyStore(nil, filepath.Join("testdata/external", "keystore"), true)
+	assert.NoError(t, err)
+	csp, err := sw.New(256, "SHA2", ks)
+	assert.NoError(t, err)
+	thisMSP.(*bccspmsp).bccsp = csp
+
+	err = thisMSP.Setup(conf)
+	assert.NoError(t, err)
 }

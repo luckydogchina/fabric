@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package integration
@@ -62,14 +52,17 @@ func TestNewGossipCryptoService(t *testing.T) {
 	endpoint3 := "localhost:5613"
 	msptesttools.LoadMSPSetupForTesting()
 	peerIdentity, _ := mgmt.GetLocalSigningIdentityOrPanic().Serialize()
-	idMapper := identity.NewIdentityMapper(cryptSvc)
+	idMapper := identity.NewIdentityMapper(cryptSvc, peerIdentity)
 
-	g1 := NewGossipComponent(peerIdentity, endpoint1, s1, secAdv, cryptSvc, idMapper,
+	g1, err := NewGossipComponent(peerIdentity, endpoint1, s1, secAdv, cryptSvc, idMapper,
 		defaultSecureDialOpts)
-	g2 := NewGossipComponent(peerIdentity, endpoint2, s2, secAdv, cryptSvc, idMapper,
+	assert.NoError(t, err)
+	g2, err := NewGossipComponent(peerIdentity, endpoint2, s2, secAdv, cryptSvc, idMapper,
 		defaultSecureDialOpts, endpoint1)
-	g3 := NewGossipComponent(peerIdentity, endpoint3, s3, secAdv, cryptSvc, idMapper,
+	assert.NoError(t, err)
+	g3, err := NewGossipComponent(peerIdentity, endpoint3, s3, secAdv, cryptSvc, idMapper,
 		defaultSecureDialOpts, endpoint1)
+	assert.NoError(t, err)
 	defer g1.Stop()
 	defer g2.Stop()
 	defer g3.Stop()
@@ -82,15 +75,13 @@ func TestBadInitialization(t *testing.T) {
 	msptesttools.LoadMSPSetupForTesting()
 	peerIdentity, _ := mgmt.GetLocalSigningIdentityOrPanic().Serialize()
 	s1 := grpc.NewServer()
-	idMapper := identity.NewIdentityMapper(cryptSvc)
-	assert.Panics(t, func() {
-		newConfig("anEndpointWithoutAPort", "anEndpointWithoutAPort")
-	})
-	assert.Panics(t, func() {
-		viper.Set("peer.tls.enabled", true)
-		NewGossipComponent(peerIdentity, "localhost:5000", s1, secAdv, cryptSvc, idMapper,
-			defaultSecureDialOpts)
-	})
+	idMapper := identity.NewIdentityMapper(cryptSvc, peerIdentity)
+	_, err := newConfig("anEndpointWithoutAPort", "anEndpointWithoutAPort")
+
+	viper.Set("peer.tls.enabled", true)
+	_, err = NewGossipComponent(peerIdentity, "localhost:5000", s1, secAdv, cryptSvc, idMapper,
+		defaultSecureDialOpts)
+	assert.Error(t, err)
 }
 
 func setupTestEnv() {

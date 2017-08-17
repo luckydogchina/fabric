@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2017 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package gossip
@@ -119,9 +109,9 @@ func newGossipInstanceWithExternalEndpoint(portPrefix int, id int, mcs *configur
 		PublishStateInfoInterval:   time.Duration(1) * time.Second,
 		RequestStateInfoInterval:   time.Duration(1) * time.Second,
 	}
-
-	idMapper := identity.NewIdentityMapper(mcs)
-	g := NewGossipServiceWithServer(conf, mcs, mcs, idMapper, api.PeerIdentityType(conf.InternalEndpoint),
+	selfId := api.PeerIdentityType(conf.InternalEndpoint)
+	idMapper := identity.NewIdentityMapper(mcs, selfId)
+	g := NewGossipServiceWithServer(conf, mcs, mcs, idMapper, selfId,
 		nil)
 
 	return g
@@ -218,28 +208,41 @@ func TestMultipleOrgEndpointLeakage(t *testing.T) {
 		}
 	}
 
-	time.Sleep(time.Second * 10)
-
-	for _, peers := range orgs2Peers {
-		for _, p := range peers {
-			peerNetMember := p.(*gossipServiceImpl).selfNetworkMember()
-			pkiID := peerNetMember.PKIid
-			peersKnown := p.Peers()
-			assert.Equal(t, amountOfPeersShouldKnow(pkiID), len(peersKnown), "peer %v doesn't know the needed amount of peers", peerNetMember.Endpoint)
-			for _, knownPeer := range peersKnown {
-				assert.True(t, shouldAKnowB(pkiID, knownPeer.PKIid))
-				if shouldKnowInternalEndpoint(pkiID, knownPeer.PKIid) {
-					errMsg := fmt.Sprintf("peer: %v doesn't know internal endpoint of %v",
-						peerNetMember.InternalEndpoint, string(knownPeer.PKIid))
-					assert.NotZero(t, knownPeer.InternalEndpoint, errMsg)
-				} else {
-					errMsg := fmt.Sprintf("peer: %v knows internal endpoint of %v",
-						peerNetMember.InternalEndpoint, string(knownPeer.PKIid))
-					assert.Zero(t, knownPeer.InternalEndpoint, errMsg)
+	membershipCheck := func() bool {
+		for _, peers := range orgs2Peers {
+			for _, p := range peers {
+				peerNetMember := p.(*gossipServiceImpl).selfNetworkMember()
+				pkiID := peerNetMember.PKIid
+				peersKnown := p.Peers()
+				peersToKnow := amountOfPeersShouldKnow(pkiID)
+				if peersToKnow != len(peersKnown) {
+					t.Logf("peer %#v doesn't know the needed amount of peers, extected %#v, actual %#v", peerNetMember.Endpoint, peersToKnow, len(peersKnown))
+					return false
+				}
+				for _, knownPeer := range peersKnown {
+					if !shouldAKnowB(pkiID, knownPeer.PKIid) {
+						assert.Fail(t, fmt.Sprintf("peer %#v doesn't know %#v", peerNetMember.Endpoint, knownPeer.Endpoint))
+						return false
+					}
+					internalEndpointLen := len(knownPeer.InternalEndpoint)
+					if shouldKnowInternalEndpoint(pkiID, knownPeer.PKIid) {
+						if internalEndpointLen == 0 {
+							t.Logf("peer: %v doesn't know internal endpoint of %v", peerNetMember.InternalEndpoint, string(knownPeer.PKIid))
+							return false
+						}
+					} else {
+						if internalEndpointLen != 0 {
+							assert.Fail(t, fmt.Sprintf("peer: %v knows internal endpoint of %v (%#v)", peerNetMember.InternalEndpoint, string(knownPeer.PKIid), knownPeer.InternalEndpoint))
+							return false
+						}
+					}
 				}
 			}
 		}
+		return true
 	}
+
+	waitUntilOrFail(t, membershipCheck)
 
 	for _, peers := range orgs2Peers {
 		for _, p := range peers {

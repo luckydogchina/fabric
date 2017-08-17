@@ -202,17 +202,17 @@ func DERToPrivateKey(der []byte) (key interface{}, err error) {
 		return
 	}
 
-	return nil, errors.New("Invalid key type. The DER must contain an rsa.PrivareKey or ecdsa.PrivateKey")
+	return nil, errors.New("Invalid key type. The DER must contain an rsa.PrivateKey or ecdsa.PrivateKey")
 }
 
 // PEMtoPrivateKey unmarshals a pem to private key
 func PEMtoPrivateKey(raw []byte, pwd []byte) (interface{}, error) {
 	if len(raw) == 0 {
-		return nil, errors.New("Invalid PEM. It must be diffrent from nil.")
+		return nil, errors.New("Invalid PEM. It must be different from nil.")
 	}
 	block, _ := pem.Decode(raw)
 	if block == nil {
-		return nil, fmt.Errorf("Failed decoding PEM. Block must be diffrent from nil. [% x]", raw)
+		return nil, fmt.Errorf("Failed decoding PEM. Block must be different from nil. [% x]", raw)
 	}
 
 	// TODO: derive from header the type of the key
@@ -244,7 +244,7 @@ func PEMtoPrivateKey(raw []byte, pwd []byte) (interface{}, error) {
 // PEMtoAES extracts from the PEM an AES key
 func PEMtoAES(raw []byte, pwd []byte) ([]byte, error) {
 	if len(raw) == 0 {
-		return nil, errors.New("Invalid PEM. It must be diffrent from nil.")
+		return nil, errors.New("Invalid PEM. It must be different from nil.")
 	}
 	block, _ := pem.Decode(raw)
 	if block == nil {
@@ -359,8 +359,19 @@ func PublicKeyToDER(publicKey interface{}) ([]byte, error) {
 
 		return PubASN1, nil
 
+	case *rsa.PublicKey:
+		if k == nil {
+			return nil, errors.New("Invalid rsa public key. It must be different from nil.")
+		}
+		PubASN1, err := x509.MarshalPKIXPublicKey(k)
+		if err != nil {
+			return nil, err
+		}
+
+		return PubASN1, nil
+
 	default:
-		return nil, errors.New("Invalid key type. It must be *ecdsa.PublicKey")
+		return nil, errors.New("Invalid key type. It must be *ecdsa.PublicKey or *rsa.PublicKey")
 	}
 }
 
@@ -404,7 +415,7 @@ func PublicKeyToEncryptedPEM(publicKey interface{}, pwd []byte) ([]byte, error) 
 // PEMtoPublicKey unmarshals a pem to public key
 func PEMtoPublicKey(raw []byte, pwd []byte) (interface{}, error) {
 	if len(raw) == 0 {
-		return nil, errors.New("Invalid PEM. It must be diffrent from nil.")
+		return nil, errors.New("Invalid PEM. It must be different from nil.")
 	}
 	block, _ := pem.Decode(raw)
 	if block == nil {
@@ -439,7 +450,7 @@ func PEMtoPublicKey(raw []byte, pwd []byte) (interface{}, error) {
 // DERToPublicKey unmarshals a der to public key
 func DERToPublicKey(raw []byte) (pub interface{}, err error) {
 	if len(raw) == 0 {
-		return nil, errors.New("Invalid DER. It must be diffrent from nil.")
+		return nil, errors.New("Invalid DER. It must be different from nil.")
 	}
 
 	key, err := x509.ParsePKIXPublicKey(raw)

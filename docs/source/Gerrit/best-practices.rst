@@ -41,7 +41,7 @@ text at 72 chars/line.
 
 | Jira: FAB-100
 | Change-Id: LONGHEXHASH
-| Signed-off-by: Your Name your.email@example.org
+| Signed-off-by: Your Name your.email\@example.org
 | AnotherExampleHeader: An Example of another Value
 
 The Gerrit server provides a precommit hook to autogenerate the
@@ -148,7 +148,7 @@ Finding Available Topics
        $ ssh -p 29418 gerrit.hyperledger.org gerrit query \ status:open project:fabric branch:master \
        | grep topic: | sort -u
 
--  `gerrit.hyperledger.org <>`__ Is the current URL where the project is
+-  `gerrit.hyperledger.org <https://gerrit.hyperledger.org>`__ Is the current URL where the project is
    hosted.
 -  *status* Indicates the topic's current status: open , merged,
    abandoned, draft, merge conflict.
@@ -369,3 +369,7 @@ Author line.
 To make these configuration changes specifically for the current Git
 user, you must add the path option ``--global`` to ``config`` as
 follows:
+
+.. Licensed under Creative Commons Attribution 4.0 International License
+   https://creativecommons.org/licenses/by/4.0/
+

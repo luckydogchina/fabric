@@ -1,4 +1,10 @@
 #!/bin/bash
+#
+# Copyright Greg Haskins All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
 
 set -x
 set -e
@@ -8,7 +14,7 @@ CHANNEL_TXNS=$2
 PEERS=$3
 TLS_ENABLED=$4
 
-CA_CRT=build/cryptogen/ordererOrganizations/orderer.net/ca/ca.orderer.net-cert.pem
+CA_CRT=build/cryptogen/ordererOrganizations/orderer.net/tlsca/tlsca.orderer.net-cert.pem
 
 if [ "$TLS_ENABLED" == "true" ]; then
    CREATE_OPTS="--tls --cafile $CA_CRT"

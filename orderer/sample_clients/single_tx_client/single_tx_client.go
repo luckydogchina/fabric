@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hyperledger/fabric/common/configtx/tool/provisional"
+	"github.com/hyperledger/fabric/common/tools/configtxgen/provisional"
 	cb "github.com/hyperledger/fabric/protos/common"
 	ab "github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protos/utils"
@@ -31,7 +31,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-var logger = logging.MustGetLogger("sbft_test")
+var logger = logging.MustGetLogger("single_tx_client")
 
 var UPDATE byte = 0
 var SEND byte = 1

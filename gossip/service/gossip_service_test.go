@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package service
@@ -24,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric/common/config"
+	"github.com/hyperledger/fabric/common/config/channel"
 	"github.com/hyperledger/fabric/common/localmsp"
 	"github.com/hyperledger/fabric/core/deliverservice"
 	"github.com/hyperledger/fabric/core/deliverservice/blocksprovider"
@@ -41,7 +31,6 @@ import (
 	"github.com/hyperledger/fabric/peer/gossip/mocks"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/peer"
-	"github.com/op/go-logging"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
@@ -67,12 +56,12 @@ func TestInitGossipService(t *testing.T) {
 	wg.Add(10)
 	for i := 0; i < 10; i++ {
 		go func() {
+			defer wg.Done()
 			messageCryptoService := peergossip.NewMCS(&mocks.ChannelPolicyManagerGetter{}, localmsp.NewSigner(), mgmt.NewDeserializersManager())
 			secAdv := peergossip.NewSecurityAdvisor(mgmt.NewDeserializersManager())
-			InitGossipService(identity, "localhost:5611", grpcServer, messageCryptoService,
+			err := InitGossipService(identity, "localhost:5611", grpcServer, messageCryptoService,
 				secAdv, nil)
-
-			wg.Done()
+			assert.NoError(t, err)
 		}()
 	}
 	wg.Wait()
@@ -287,7 +276,7 @@ type mockDeliverService struct {
 	running map[string]bool
 }
 
-func (ds *mockDeliverService) StartDeliverForChannel(chainID string, ledgerInfo blocksprovider.LedgerInfo) error {
+func (ds *mockDeliverService) StartDeliverForChannel(chainID string, ledgerInfo blocksprovider.LedgerInfo, finalizer func()) error {
 	ds.running[chainID] = true
 	return nil
 }
@@ -331,9 +320,6 @@ func TestLeaderElectionWithRealGossip(t *testing.T) {
 	// Run additional leader election services for new channel
 	// Check correct leader still exist for first channel and new correct leader chosen in second channel
 	// Stop gossip instances of leader peers for both channels and see that new leader chosen for both
-
-	logging.SetLevel(logging.DEBUG, util.LoggingElectionModule)
-	logging.SetLevel(logging.DEBUG, util.LoggingServiceModule)
 
 	// Creating gossip service instances for peers
 	n := 10
@@ -612,11 +598,12 @@ func newGossipInstance(portPrefix int, id int, maxMsgCount int, boot ...int) Gos
 		PublishStateInfoInterval:   time.Duration(1) * time.Second,
 		RequestStateInfoInterval:   time.Duration(1) * time.Second,
 	}
+	selfId := api.PeerIdentityType(conf.InternalEndpoint)
 	cryptoService := &naiveCryptoService{}
-	idMapper := identity.NewIdentityMapper(cryptoService)
+	idMapper := identity.NewIdentityMapper(cryptoService, selfId)
 
 	gossip := gossip.NewGossipServiceWithServer(conf, &orgCryptoService{}, cryptoService,
-		idMapper, api.PeerIdentityType(conf.InternalEndpoint), nil)
+		idMapper, selfId, nil)
 
 	gossipService := &gossipServiceImpl{
 		gossipSvc:       gossip,
@@ -706,8 +693,9 @@ func TestInvalidInitialization(t *testing.T) {
 	defer grpcServer.Stop()
 
 	secAdv := peergossip.NewSecurityAdvisor(mgmt.NewDeserializersManager())
-	InitGossipService(api.PeerIdentityType("IDENTITY"), "localhost:7611", grpcServer,
+	err := InitGossipService(api.PeerIdentityType("IDENTITY"), "localhost:7611", grpcServer,
 		&naiveCryptoService{}, secAdv, nil)
+	assert.NoError(t, err)
 	gService := GetGossipService().(*gossipServiceImpl)
 	defer gService.Stop()
 
@@ -730,8 +718,9 @@ func TestChannelConfig(t *testing.T) {
 	defer grpcServer.Stop()
 
 	secAdv := peergossip.NewSecurityAdvisor(mgmt.NewDeserializersManager())
-	InitGossipService(api.PeerIdentityType("IDENTITY"), "localhost:6611", grpcServer,
+	error = InitGossipService(api.PeerIdentityType("IDENTITY"), "localhost:6611", grpcServer,
 		&naiveCryptoService{}, secAdv, nil)
+	assert.NoError(t, error)
 	gService := GetGossipService().(*gossipServiceImpl)
 	defer gService.Stop()
 

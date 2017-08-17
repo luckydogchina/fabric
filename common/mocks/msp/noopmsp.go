@@ -24,7 +24,7 @@ import (
 type noopmsp struct {
 }
 
-// NewNoopMsp returns a no-op implementation of the MSP inteface
+// NewNoopMsp returns a no-op implementation of the MSP interface
 func NewNoopMsp() m.MSP {
 	return &noopmsp{}
 }
@@ -58,6 +58,16 @@ func (msp *noopmsp) GetRootCerts() []m.Identity {
 
 // GetIntermediateCerts returns the intermediate root certificates for this MSP
 func (msp *noopmsp) GetIntermediateCerts() []m.Identity {
+	return nil
+}
+
+// GetTLSRootCerts returns the root certificates for this MSP
+func (msp *noopmsp) GetTLSRootCerts() [][]byte {
+	return nil
+}
+
+// GetTLSIntermediateCerts returns the intermediate root certificates for this MSP
+func (msp *noopmsp) GetTLSIntermediateCerts() [][]byte {
 	return nil
 }
 
@@ -105,14 +115,6 @@ func (id *noopidentity) Verify(msg []byte, sig []byte) error {
 	return nil
 }
 
-func (id *noopidentity) VerifyOpts(msg []byte, sig []byte, opts m.SignatureOpts) error {
-	return nil
-}
-
-func (id *noopidentity) VerifyAttributes(proof []byte, spec *m.AttributeProofSpec) error {
-	return nil
-}
-
 func (id *noopidentity) Serialize() ([]byte, error) {
 	return []byte("cert"), nil
 }
@@ -129,18 +131,6 @@ func (id *noopsigningidentity) Sign(msg []byte) ([]byte, error) {
 	return []byte("signature"), nil
 }
 
-func (id *noopsigningidentity) SignOpts(msg []byte, opts m.SignatureOpts) ([]byte, error) {
-	return nil, nil
-}
-
-func (id *noopsigningidentity) GetAttributeProof(spec *m.AttributeProofSpec) (proof []byte, err error) {
-	return nil, nil
-}
-
 func (id *noopsigningidentity) GetPublicVersion() m.Identity {
 	return id
-}
-
-func (id *noopsigningidentity) Renew() error {
-	return nil
 }

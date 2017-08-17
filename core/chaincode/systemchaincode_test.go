@@ -51,6 +51,12 @@ func initSysCCTests() (*oldSysCCInfo, net.Listener, error) {
 
 	peer.MockInitialize()
 
+	mspGetter := func(cid string) []string {
+		return []string{"DEFAULT"}
+	}
+
+	peer.MockSetMSPIDGetter(mspGetter)
+
 	//use a different address than what we usually use for "peer"
 	//we override the peerAddress set in chaincode_support.go
 	// FIXME: Use peer.GetLocalAddress()
@@ -134,6 +140,7 @@ func deploySampleSysCC(t *testing.T, ctxt context.Context, chainID string) error
 
 // Test deploy of a transaction.
 func TestExecuteDeploySysChaincode(t *testing.T) {
+	testForSkip(t)
 	sysccinfo, lis, err := initSysCCTests()
 	if err != nil {
 		t.Fail()
@@ -165,6 +172,7 @@ func TestExecuteDeploySysChaincode(t *testing.T) {
 
 // Test multichains
 func TestMultichains(t *testing.T) {
+	testForSkip(t)
 	sysccinfo, lis, err := initSysCCTests()
 	if err != nil {
 		t.Fail()

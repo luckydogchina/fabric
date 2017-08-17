@@ -16,6 +16,9 @@ limitations under the License.
 package lscc
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -24,28 +27,25 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/cauthdsl"
+	"github.com/hyperledger/fabric/common/mocks/scc"
+	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 	"github.com/hyperledger/fabric/core/common/ccpackage"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/common/sysccprovider"
-	//"github.com/hyperledger/fabric/core/container"
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
-
-	"github.com/hyperledger/fabric/common/mocks/scc"
-	"github.com/hyperledger/fabric/common/policies"
+	cutil "github.com/hyperledger/fabric/core/container/util"
+	"github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/policy"
+	policymocks "github.com/hyperledger/fabric/core/policy/mocks"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/msp/mgmt/testtools"
 	"github.com/hyperledger/fabric/protos/common"
-	putils "github.com/hyperledger/fabric/protos/utils"
-
-	cutil "github.com/hyperledger/fabric/core/container/util"
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protos/utils"
+	putils "github.com/hyperledger/fabric/protos/utils"
+	"github.com/stretchr/testify/assert"
 )
 
 var lscctestpath = "/tmp/lscctest"
@@ -86,7 +86,7 @@ func TestInstall(t *testing.T) {
 	testInstall(t, "example02.go", "0", path, InvalidChaincodeNameErr("example02.go").Error(), "Alice")
 	testInstall(t, "", "0", path, EmptyChaincodeNameErr("").Error(), "Alice")
 	testInstall(t, "example02", "1{}0", path, InvalidVersionErr("1{}0").Error(), "Alice")
-	testInstall(t, "example02", "0", path, "Authorization for INSTALL on", "Bob")
+	testInstall(t, "example02", "0", path, "Authorization for INSTALL has been denied", "Bob")
 }
 
 func testInstall(t *testing.T, ccname string, version string, path string, expectedErrorMsg string, caller string) {
@@ -99,16 +99,16 @@ func testInstall(t *testing.T, ccname string, version string, path string, expec
 	}
 
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 
 	cds, err := constructDeploymentSpec(ccname, path, version, [][]byte{[]byte("init"), []byte("a"), []byte("100"), []byte("b"), []byte("200")}, false)
@@ -229,6 +229,8 @@ func TestInvalidCodeDeploy(t *testing.T) {
 // constructDeploymentSpec() with the createFS flag set to true places the
 // chaincode onto the filesystem to install it before it then attempts to
 // instantiate the chaincode
+// A default instantiation policy is used automatically because the cc package
+// comes without a policy.
 func TestDeploy(t *testing.T) {
 	path := "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02"
 
@@ -251,16 +253,16 @@ func testDeploy(t *testing.T, ccname string, version string, path string, forceB
 	}
 
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
 	identityDeserializer.Msg = sProp.ProposalBytes
@@ -282,8 +284,9 @@ func testDeploy(t *testing.T, ccname string, version string, path string, forceB
 		t.FailNow()
 	}
 
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	res := stub.MockInvoke("1", args)
+	res := stub.MockInvokeWithSignedProposal("1", args, sProp2)
 
 	if expectedErrorMsg == "" {
 		if res.Status != shim.OK {
@@ -353,14 +356,16 @@ func TestRedeploy(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	if res := stub.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		t.FailNow()
 	}
 
 	//this should fail with exists error
+	sProp, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args = [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	res := stub.MockInvoke("1", args)
+	res := stub.MockInvokeWithSignedProposal("1", args, sProp)
 	if string(res.Message) != ExistsErr("example02").Error() {
 		t.FailNow()
 	}
@@ -377,16 +382,16 @@ func TestMultipleDeploy(t *testing.T) {
 	}
 
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
 	identityDeserializer.Msg = sProp.ProposalBytes
@@ -403,8 +408,9 @@ func TestMultipleDeploy(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	if res := stub.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		t.FailNow()
 	}
 
@@ -424,7 +430,7 @@ func TestMultipleDeploy(t *testing.T) {
 	}
 
 	args = [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	if res := stub.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		t.FailNow()
 	}
 
@@ -462,16 +468,16 @@ func TestRetryFailedDeploy(t *testing.T) {
 		t.FailNow()
 	}
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
 	identityDeserializer.Msg = sProp.ProposalBytes
@@ -489,8 +495,9 @@ func TestRetryFailedDeploy(t *testing.T) {
 	}
 
 	//send invalid chain name name that should fail
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte(""), b}
-	res := stub.MockInvoke("1", args)
+	res := stub.MockInvokeWithSignedProposal("1", args, sProp2)
 	if res.Status == shim.OK {
 		//expected error but got success
 		t.FailNow()
@@ -503,7 +510,7 @@ func TestRetryFailedDeploy(t *testing.T) {
 
 	//deploy correctly now
 	args = [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	if res := stub.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		t.FailNow()
 	}
 
@@ -525,16 +532,16 @@ func TestTamperChaincode(t *testing.T) {
 	}
 
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
 	identityDeserializer.Msg = sProp.ProposalBytes
@@ -555,8 +562,9 @@ func TestTamperChaincode(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	res := stub.MockInvoke("1", args)
+	res := stub.MockInvokeWithSignedProposal("1", args, sProp2)
 	if res.Status != shim.OK {
 		t.Logf("Could not deploy example01.0")
 		t.FailNow()
@@ -576,7 +584,7 @@ func TestTamperChaincode(t *testing.T) {
 
 	//deploy correctly now
 	args = [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	if res = stub.MockInvoke("1", args); res.Status != shim.OK {
+	if res = stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		t.Logf("Could not deploy example02.0")
 		t.FailNow()
 	}
@@ -611,9 +619,48 @@ func TestTamperChaincode(t *testing.T) {
 	}
 }
 
+//TestIPolDeployFail tests chaincode deploy with an instantiation default policy if the cc package comes without a policy
+func TestIPolDeployDefaultFail(t *testing.T) {
+	scc := new(LifeCycleSysCC)
+	stub := shim.NewMockStub("lscc", scc)
+
+	if res := stub.MockInit("1", nil); res.Status != shim.OK {
+		t.Fatalf("Init failed: %s", string(res.Message))
+	}
+
+	// Init the policy checker
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
+		Managers: map[string]policies.Manager{
+			chainid: &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
+		},
+	}
+	scc.policyChecker = policy.NewPolicyChecker(
+		policyManagerGetter,
+		identityDeserializer,
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+	)
+	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
+	identityDeserializer.Msg = sProp.ProposalBytes
+	sProp.Signature = sProp.ProposalBytes
+
+	cds, err := constructDeploymentSpec("example02", "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02", "0", [][]byte{[]byte("init"), []byte("a"), []byte("100"), []byte("b"), []byte("200")}, true)
+	assert.NoError(t, err)
+	defer os.Remove(lscctestpath + "/example02.0")
+
+	cdsbytes, err := proto.Marshal(cds)
+	assert.NoError(t, err)
+
+	// invoke deploy with a signed proposal that is not satisfied by the default policy
+	args := [][]byte{[]byte(DEPLOY), []byte(chainid), cdsbytes}
+	if res := stub.MockInvokeWithSignedProposal("1", args, sProp); res.Status == shim.OK {
+		t.Fatalf("Deploy must not succeed!")
+	}
+}
+
 //TestIPolDeploy tests chaincode deploy with an instantiation policy
 func TestIPolDeploy(t *testing.T) {
-	// default policy, this should succeed
+	// default test policy, this should succeed
 	testIPolDeploy(t, "", true)
 	// policy involving an unknown ORG, this should fail
 	testIPolDeploy(t, "AND('ORG.admin')", false)
@@ -628,16 +675,16 @@ func testIPolDeploy(t *testing.T, iPol string, successExpected bool) {
 	}
 
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			chainid: &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			chainid: &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
 	identityDeserializer.Msg = sProp.ProposalBytes
@@ -645,9 +692,7 @@ func testIPolDeploy(t *testing.T, iPol string, successExpected bool) {
 
 	// create deployment spec, don't write to disk, just marshal it to be used in a signed dep spec
 	cds, err := constructDeploymentSpec("example02", "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02", "0", [][]byte{[]byte("init"), []byte("a"), []byte("100"), []byte("b"), []byte("200")}, false)
-	if err != nil {
-		t.Fatalf("Error creating deployment spec: [%s]", err)
-	}
+	assert.NoError(t, err)
 	// create an instantiation policy
 	var ip *common.SignaturePolicyEnvelope
 	ip = cauthdsl.SignedByMspAdmin(mspid)
@@ -659,38 +704,19 @@ func testIPolDeploy(t *testing.T, iPol string, successExpected bool) {
 	}
 	// create signed dep spec
 	cdsbytes, err := proto.Marshal(cds)
-	if err != nil {
-		t.Fatalf("Marshalling CDS failed: [%s]", err)
-	}
+	assert.NoError(t, err)
 	objToWrite, err := ccpackage.OwnerCreateSignedCCDepSpec(cds, ip, nil)
-	if err != nil {
-		t.Fatalf("Failed to create Signed CDS envelope %s", err)
-	}
+	assert.NoError(t, err)
 	// write it to disk
 	bytesToWrite, err := proto.Marshal(objToWrite)
-	if err != nil {
-		t.Fatalf("Failed to marshal Signed CDS envelope %s", err)
-	}
+	assert.NoError(t, err)
 	fileToWrite := lscctestpath + "/example02.0"
 	err = ioutil.WriteFile(fileToWrite, bytesToWrite, 0700)
-	if err != nil {
-		t.Fatalf("Failed to write Signed CDS envelope to disk: %s", err)
-	}
+	assert.NoError(t, err)
 	defer os.Remove(lscctestpath + "/example02.0")
 
 	// invoke deploy with a signed proposal that will be evaluated based on the policy
-	prop, _, err := putils.CreateChaincodeProposal(
-		common.HeaderType_ENDORSER_TRANSACTION,
-		chainid,
-		&pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{}},
-		sid)
-	if err != nil {
-		t.Fatalf("Error creating signed CC proposal [%s]", err)
-	}
-	sProp2, err := putils.GetSignedProposal(prop, id)
-	if err != nil {
-		t.Fatalf("Error getting signed proposal [%s]", err)
-	}
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte(chainid), cdsbytes}
 	if res := stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		if successExpected {
@@ -738,8 +764,9 @@ func testUpgrade(t *testing.T, ccname string, version string, newccname string, 
 		t.Fatalf("Marshal DeploymentSpec failed")
 	}
 
+	sProp, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	if res := stub.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stub.MockInvokeWithSignedProposal("1", args, sProp); res.Status != shim.OK {
 		t.Fatalf("Deploy chaincode error: %v", err)
 	}
 
@@ -761,7 +788,7 @@ func testUpgrade(t *testing.T, ccname string, version string, newccname string, 
 	}
 
 	args = [][]byte{[]byte(UPGRADE), []byte("test"), newb}
-	res := stub.MockInvoke("1", args)
+	res := stub.MockInvokeWithSignedProposal("1", args, sProp)
 	if expectedErrorMsg == "" {
 		if res.Status != shim.OK {
 			t.Fatalf("Upgrade chaincode error: %v", err)
@@ -799,64 +826,43 @@ func testIPolUpgrade(t *testing.T, iPol string, successExpected bool) {
 	scc := new(LifeCycleSysCC)
 	stub := shim.NewMockStub("lscc", scc)
 	if res := stub.MockInit("1", nil); res.Status != shim.OK {
-		fmt.Println("Init failed", string(res.Message))
-		t.FailNow()
+		t.Fatalf("Init failed %s", string(res.Message))
 	}
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			chainid: &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			chainid: &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
 	identityDeserializer.Msg = sProp.ProposalBytes
 	sProp.Signature = sProp.ProposalBytes
 	// create deployment spec, don't write to disk, just marshal it to be used in a signed dep spec
 	cds, err := constructDeploymentSpec("example02", "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02", "0", [][]byte{[]byte("init"), []byte("a"), []byte("100"), []byte("b"), []byte("200")}, false)
-	if err != nil {
-		t.Fatalf("Error creating deployment spec: [%s]", err)
-	}
+	assert.NoError(t, err)
 	// create an instantiation policy
 	ip := cauthdsl.SignedByMspAdmin(mspid)
 	// create signed dep spec
 	cdsbytes, err := proto.Marshal(cds)
-	if err != nil {
-		t.Fatalf("Marshalling CDS failed: [%s]", err)
-	}
+	assert.NoError(t, err)
 	objToWrite, err := ccpackage.OwnerCreateSignedCCDepSpec(cds, ip, nil)
-	if err != nil {
-		t.Fatalf("Failed to create Signed CDS envelope %s", err)
-	}
+	assert.NoError(t, err)
 	// write it to disk
 	bytesToWrite, err := proto.Marshal(objToWrite)
-	if err != nil {
-		t.Fatalf("Failed to marshal Signed CDS envelope %s", err)
-	}
+	assert.NoError(t, err)
 	fileToWrite := lscctestpath + "/example02.0"
 	err = ioutil.WriteFile(fileToWrite, bytesToWrite, 0700)
-	if err != nil {
-		t.Fatalf("Failed to write CC to disk: %s", err)
-	}
+	assert.NoError(t, err)
 	defer os.Remove(lscctestpath + "/example02.0")
 	// invoke deploy with a signed proposal that will be evaluated based on the policy
-	prop, _, err := putils.CreateChaincodeProposal(
-		common.HeaderType_ENDORSER_TRANSACTION,
-		chainid,
-		&pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{}},
-		sid)
-	if err != nil {
-		t.Fatalf("Error creating signed CC proposal [%s]", err)
-	}
-	sProp2, err := putils.GetSignedProposal(prop, id)
-	if err != nil {
-		t.Fatalf("Error getting signed proposal [%s]", err)
-	}
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
+	assert.NoError(t, err)
 	args := [][]byte{[]byte(DEPLOY), []byte(chainid), cdsbytes}
 	if res := stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		t.Fatalf("Deploy failed %s", res)
@@ -869,34 +875,22 @@ func testIPolUpgrade(t *testing.T, iPol string, successExpected bool) {
 	// here starts the interesting part for upgrade
 	// create deployment spec
 	cds, err = constructDeploymentSpec("example02", "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02", "1", [][]byte{[]byte("init"), []byte("a"), []byte("100"), []byte("b"), []byte("200")}, false)
-	if err != nil {
-		t.Fatalf("Error creating deployment spec: [%s]", err)
-	}
+	assert.NoError(t, err)
 	cdsbytes, err = proto.Marshal(cds)
-	if err != nil {
-		t.Fatalf("Marshalling CDS failed: [%s]", err)
-	}
+	assert.NoError(t, err)
 	// create the instantiation policy
 	if iPol != "" {
 		ip, err = cauthdsl.FromString(iPol)
-		if err != nil {
-			t.Fatalf("Error creating instantiation policy %s: [%s]", iPol, err)
-		}
+		assert.NoError(t, err)
 	}
 	// create the signed ccpackage of the new version
 	objToWrite, err = ccpackage.OwnerCreateSignedCCDepSpec(cds, ip, nil)
-	if err != nil {
-		t.Fatalf("Failed to create Signed CDS envelope %s", err)
-	}
+	assert.NoError(t, err)
 	bytesToWrite, err = proto.Marshal(objToWrite)
-	if err != nil {
-		t.Fatalf("Failed to marshal Signed CDS envelope %s", err)
-	}
+	assert.NoError(t, err)
 	fileToWrite = lscctestpath + "/example02.1"
 	err = ioutil.WriteFile(fileToWrite, bytesToWrite, 0700)
-	if err != nil {
-		t.Fatalf("Failed to write CC to disk: %s", err)
-	}
+	assert.NoError(t, err)
 	defer os.Remove(lscctestpath + "/example02.1")
 
 	// invoke upgrade with a signed proposal that will be evaluated based on the policy
@@ -925,16 +919,16 @@ func TestGetAPIsWithoutInstall(t *testing.T) {
 		t.FailNow()
 	}
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 	sProp, _ := utils.MockSignedEndorserProposalOrPanic("", &pb.ChaincodeSpec{}, []byte("Alice"), []byte("msg1"))
 	identityDeserializer.Msg = sProp.ProposalBytes
@@ -947,8 +941,9 @@ func TestGetAPIsWithoutInstall(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	if res := stub.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		t.FailNow()
 	}
 
@@ -1025,16 +1020,16 @@ func TestGetInstalledChaincodesAccessRights(t *testing.T) {
 	}
 
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 
 	// Should pass
@@ -1069,16 +1064,16 @@ func TestGetChaincodesAccessRights(t *testing.T) {
 	}
 
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 
 	// Should pass
@@ -1113,16 +1108,16 @@ func TestGetCCAccessRights(t *testing.T) {
 	}
 
 	// Init the policy checker
-	identityDeserializer := &policy.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
-	policyManagerGetter := &policy.MockChannelPolicyManagerGetter{
+	identityDeserializer := &policymocks.MockIdentityDeserializer{[]byte("Alice"), []byte("msg1")}
+	policyManagerGetter := &policymocks.MockChannelPolicyManagerGetter{
 		Managers: map[string]policies.Manager{
-			"test": &policy.MockChannelPolicyManager{MockPolicy: &policy.MockPolicy{Deserializer: identityDeserializer}},
+			"test": &policymocks.MockChannelPolicyManager{MockPolicy: &policymocks.MockPolicy{Deserializer: identityDeserializer}},
 		},
 	}
 	scc.policyChecker = policy.NewPolicyChecker(
 		policyManagerGetter,
 		identityDeserializer,
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Alice")},
+		&policymocks.MockMSPPrincipalGetter{Principal: []byte("Alice")},
 	)
 
 	cds, err := constructDeploymentSpec("example02", "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02", "0", [][]byte{[]byte("init"), []byte("a"), []byte("100"), []byte("b"), []byte("200")}, true)
@@ -1132,8 +1127,9 @@ func TestGetCCAccessRights(t *testing.T) {
 		t.FailNow()
 	}
 
+	sProp2, _ := putils.MockSignedEndorserProposal2OrPanic(chainid, &pb.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte(DEPLOY), []byte("test"), b}
-	if res := stub.MockInvoke("1", args); res.Status != shim.OK {
+	if res := stub.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		t.FailNow()
 	}
 
@@ -1216,6 +1212,12 @@ func TestMain(m *testing.M) {
 	ccprovider.SetChaincodesPath(lscctestpath)
 	sysccprovider.RegisterSystemChaincodeProviderFactory(&scc.MocksccProviderFactory{})
 
+	mspGetter := func(cid string) []string {
+		return []string{"DEFAULT"}
+	}
+
+	peer.MockSetMSPIDGetter(mspGetter)
+
 	var err error
 
 	// setup the MSP manager so that we can sign/verify
@@ -1254,6 +1256,9 @@ func TestMain(m *testing.M) {
 		fmt.Printf("Failure getting the msp identifier, err %s", err)
 		os.Exit(-1)
 	}
+
+	// also set the MSP for the "test" chain
+	mspmgmt.XXXSetMSPManager("test", mspmgmt.GetManagerForChain(util.GetTestChainID()))
 
 	os.Exit(m.Run())
 }

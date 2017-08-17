@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package state
@@ -29,17 +19,20 @@ import (
 	"github.com/hyperledger/fabric/common/configtx/test"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/committer"
+	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/mocks/validator"
 	"github.com/hyperledger/fabric/gossip/api"
 	"github.com/hyperledger/fabric/gossip/comm"
 	"github.com/hyperledger/fabric/gossip/common"
+	"github.com/hyperledger/fabric/gossip/discovery"
 	"github.com/hyperledger/fabric/gossip/gossip"
 	"github.com/hyperledger/fabric/gossip/identity"
 	"github.com/hyperledger/fabric/gossip/state/mocks"
 	gutil "github.com/hyperledger/fabric/gossip/util"
 	pcomm "github.com/hyperledger/fabric/protos/common"
 	proto "github.com/hyperledger/fabric/protos/gossip"
+	"github.com/hyperledger/fabric/protos/ledger/rwset"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -167,6 +160,7 @@ func (node *peerNode) shutdown() {
 
 type mockCommitter struct {
 	mock.Mock
+	sync.Mutex
 }
 
 func (mc *mockCommitter) Commit(block *pcomm.Block) error {
@@ -175,6 +169,8 @@ func (mc *mockCommitter) Commit(block *pcomm.Block) error {
 }
 
 func (mc *mockCommitter) LedgerHeight() (uint64, error) {
+	mc.Lock()
+	defer mc.Unlock()
 	if mc.Called().Get(1) == nil {
 		return mc.Called().Get(0).(uint64), nil
 	}
@@ -214,9 +210,10 @@ func newGossipConfig(id int, boot ...int) *gossip.Config {
 
 // Create gossip instance
 func newGossipInstance(config *gossip.Config, mcs api.MessageCryptoService) gossip.Gossip {
-	idMapper := identity.NewIdentityMapper(mcs)
+	id := api.PeerIdentityType(config.InternalEndpoint)
+	idMapper := identity.NewIdentityMapper(mcs, id)
 	return gossip.NewGossipServiceWithServer(config, &orgCryptoService{}, mcs,
-		idMapper, []byte(config.InternalEndpoint), nil)
+		idMapper, id, nil)
 }
 
 // Create new instance of KVLedger to be used for testing
@@ -240,7 +237,8 @@ func newPeerNodeWithGossip(config *gossip.Config, committer committer.Committer,
 	// Initialize pseudo peer simulator, which has only three
 	// basic parts
 
-	sp := NewGossipStateProvider(util.GetTestChainID(), g, committer, cs)
+	servicesAdapater := &ServicesMediator{GossipAdapter: g, MCSAdapter: cs}
+	sp := NewGossipStateProvider(util.GetTestChainID(), servicesAdapater, committer)
 	if sp == nil {
 		return nil
 	}
@@ -269,10 +267,115 @@ func TestNilDirectMsg(t *testing.T) {
 	defer p.shutdown()
 	p.s.(*GossipStateProviderImpl).handleStateRequest(nil)
 	p.s.(*GossipStateProviderImpl).directMessage(nil)
+	sMsg, _ := p.s.(*GossipStateProviderImpl).stateRequestMessage(uint64(10), uint64(8)).NoopSign()
 	req := &comm.ReceivedMessageImpl{
-		SignedGossipMessage: p.s.(*GossipStateProviderImpl).stateRequestMessage(uint64(10), uint64(8)).NoopSign(),
+		SignedGossipMessage: sMsg,
 	}
 	p.s.(*GossipStateProviderImpl).directMessage(req)
+}
+
+func TestNilAddPayload(t *testing.T) {
+	mc := &mockCommitter{}
+	mc.On("LedgerHeight", mock.Anything).Return(uint64(1), nil)
+	g := &mocks.GossipMock{}
+	g.On("Accept", mock.Anything, false).Return(make(<-chan *proto.GossipMessage), nil)
+	g.On("Accept", mock.Anything, true).Return(nil, make(<-chan proto.ReceivedMessage))
+	p := newPeerNodeWithGossip(newGossipConfig(0), mc, noopPeerIdentityAcceptor, g)
+	defer p.shutdown()
+	err := p.s.AddPayload(nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil")
+}
+
+func TestAddPayloadLedgerUnavailable(t *testing.T) {
+	mc := &mockCommitter{}
+	mc.On("LedgerHeight", mock.Anything).Return(uint64(1), nil)
+	g := &mocks.GossipMock{}
+	g.On("Accept", mock.Anything, false).Return(make(<-chan *proto.GossipMessage), nil)
+	g.On("Accept", mock.Anything, true).Return(nil, make(<-chan proto.ReceivedMessage))
+	p := newPeerNodeWithGossip(newGossipConfig(0), mc, noopPeerIdentityAcceptor, g)
+	defer p.shutdown()
+	// Simulate a problem in the ledger
+	failedLedger := mock.Mock{}
+	failedLedger.On("LedgerHeight", mock.Anything).Return(uint64(0), errors.New("cannot query ledger"))
+	mc.Lock()
+	mc.Mock = failedLedger
+	mc.Unlock()
+
+	rawblock := pcomm.NewBlock(uint64(1), []byte{})
+	b, _ := pb.Marshal(rawblock)
+	err := p.s.AddPayload(&proto.Payload{
+		SeqNum: uint64(1),
+		Data:   b,
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Failed obtaining ledger height")
+	assert.Contains(t, err.Error(), "cannot query ledger")
+}
+
+func TestOverPopulation(t *testing.T) {
+	// Scenario: Add to the state provider blocks
+	// with a gap in between, and ensure that the payload buffer
+	// rejects blocks starting if the distance between the ledger height to the latest
+	// block it contains is bigger than defMaxBlockDistance.
+
+	mc := &mockCommitter{}
+	blocksPassedToLedger := make(chan uint64, 10)
+	mc.On("Commit", mock.Anything).Run(func(arg mock.Arguments) {
+		blocksPassedToLedger <- arg.Get(0).(*pcomm.Block).Header.Number
+	})
+	mc.On("LedgerHeight", mock.Anything).Return(uint64(1), nil)
+	g := &mocks.GossipMock{}
+	g.On("Accept", mock.Anything, false).Return(make(<-chan *proto.GossipMessage), nil)
+	g.On("Accept", mock.Anything, true).Return(nil, make(<-chan proto.ReceivedMessage))
+	p := newPeerNode(newGossipConfig(0), mc, noopPeerIdentityAcceptor)
+	defer p.shutdown()
+
+	// Add some blocks in a sequential manner and make sure it works
+	for i := 1; i <= 4; i++ {
+		rawblock := pcomm.NewBlock(uint64(i), []byte{})
+		b, _ := pb.Marshal(rawblock)
+		assert.NoError(t, p.s.AddPayload(&proto.Payload{
+			SeqNum: uint64(i),
+			Data:   b,
+		}))
+	}
+
+	// Add payloads from 10 to defMaxBlockDistance, while we're missing blocks [5,9]
+	// Should succeed
+	for i := 10; i <= defMaxBlockDistance; i++ {
+		rawblock := pcomm.NewBlock(uint64(i), []byte{})
+		b, _ := pb.Marshal(rawblock)
+		assert.NoError(t, p.s.AddPayload(&proto.Payload{
+			SeqNum: uint64(i),
+			Data:   b,
+		}))
+	}
+
+	// Add payloads from defMaxBlockDistance + 2 to defMaxBlockDistance * 10
+	// Should fail.
+	for i := defMaxBlockDistance + 1; i <= defMaxBlockDistance*10; i++ {
+		rawblock := pcomm.NewBlock(uint64(i), []byte{})
+		b, _ := pb.Marshal(rawblock)
+		assert.Error(t, p.s.AddPayload(&proto.Payload{
+			SeqNum: uint64(i),
+			Data:   b,
+		}))
+	}
+
+	// Ensure only blocks 1-4 were passed to the ledger
+	close(blocksPassedToLedger)
+	i := 1
+	for seq := range blocksPassedToLedger {
+		assert.Equal(t, uint64(i), seq)
+		i++
+	}
+	assert.Equal(t, 5, i)
+
+	// Ensure we don't store too many blocks in memory
+	sp := p.s.(*GossipStateProviderImpl)
+	assert.True(t, sp.payloads.Size() < defMaxBlockDistance)
+
 }
 
 func TestFailures(t *testing.T) {
@@ -281,6 +384,7 @@ func TestFailures(t *testing.T) {
 	g := &mocks.GossipMock{}
 	g.On("Accept", mock.Anything, false).Return(make(<-chan *proto.GossipMessage), nil)
 	g.On("Accept", mock.Anything, true).Return(nil, make(<-chan proto.ReceivedMessage))
+	g.On("PeersOfChannel", mock.Anything).Return([]discovery.NetworkMember{})
 	assert.Panics(t, func() {
 		newPeerNodeWithGossip(newGossipConfig(0), mc, noopPeerIdentityAcceptor, g)
 	})
@@ -339,6 +443,7 @@ func TestGossipReception(t *testing.T) {
 		signalChan <- struct{}{}
 	})
 	g.On("Accept", mock.Anything, true).Return(nil, make(<-chan proto.ReceivedMessage))
+	g.On("PeersOfChannel", mock.Anything).Return([]discovery.NetworkMember{})
 	mc := &mockCommitter{}
 	receivedChan := make(chan struct{})
 	mc.On("Commit", mock.Anything).Run(func(arguments mock.Arguments) {
@@ -764,6 +869,425 @@ func TestNewGossipStateProvider_BatchingOfStateRequest(t *testing.T) {
 			close(stopWaiting)
 			t.Fatal("Expected to receive two batches with missing payloads")
 		}
+	}
+}
+
+// coordinatorMock mocking structure to capture mock interface for
+// coord to simulate coord flow during the test
+type coordinatorMock struct {
+	mock.Mock
+}
+
+func (mock *coordinatorMock) GetPvtDataAndBlockByNum(seqNum uint64, filter PvtDataFilter) (*pcomm.Block, PvtDataCollections, error) {
+	args := mock.Called(seqNum)
+	return args.Get(0).(*pcomm.Block), args.Get(1).(PvtDataCollections), args.Error(2)
+}
+
+func (mock *coordinatorMock) GetBlockByNum(seqNum uint64) (*pcomm.Block, error) {
+	args := mock.Called(seqNum)
+	return args.Get(0).(*pcomm.Block), args.Error(1)
+}
+
+func (mock *coordinatorMock) StoreBlock(block *pcomm.Block, data ...PvtDataCollections) ([]string, error) {
+	args := mock.Called(block, data)
+	return args.Get(0).([]string), args.Error(1)
+}
+
+func (mock *coordinatorMock) LedgerHeight() (uint64, error) {
+	args := mock.Called()
+	return args.Get(0).(uint64), args.Error(1)
+}
+
+func (mock *coordinatorMock) Close() {
+	mock.Called()
+}
+
+type receivedMessageMock struct {
+	mock.Mock
+}
+
+func (mock *receivedMessageMock) Respond(msg *proto.GossipMessage) {
+	mock.Called(msg)
+}
+
+func (mock *receivedMessageMock) GetGossipMessage() *proto.SignedGossipMessage {
+	args := mock.Called()
+	return args.Get(0).(*proto.SignedGossipMessage)
+}
+
+func (mock *receivedMessageMock) GetSourceEnvelope() *proto.Envelope {
+	args := mock.Called()
+	return args.Get(0).(*proto.Envelope)
+}
+
+func (mock *receivedMessageMock) GetConnectionInfo() *proto.ConnectionInfo {
+	args := mock.Called()
+	return args.Get(0).(*proto.ConnectionInfo)
+}
+
+type testData struct {
+	block   *pcomm.Block
+	pvtData PvtDataCollections
+}
+
+func TestTransferOfPrivateRWSet(t *testing.T) {
+	chainID := "testChainID"
+
+	// First gossip instance
+	g := &mocks.GossipMock{}
+	coord1 := new(coordinatorMock)
+
+	gossipChannel := make(chan *proto.GossipMessage)
+	commChannel := make(chan proto.ReceivedMessage)
+
+	gossipChannelFactory := func(ch chan *proto.GossipMessage) <-chan *proto.GossipMessage {
+		return ch
+	}
+
+	commChannelFactory := func(ch chan proto.ReceivedMessage) <-chan proto.ReceivedMessage {
+		return ch
+	}
+
+	g.On("Accept", mock.Anything, false).Return(gossipChannelFactory(gossipChannel), nil)
+	g.On("Accept", mock.Anything, true).Return(nil, commChannelFactory(commChannel))
+
+	g.On("UpdateChannelMetadata", mock.Anything, mock.Anything)
+	g.On("PeersOfChannel", mock.Anything).Return([]discovery.NetworkMember{})
+	g.On("Close")
+
+	coord1.On("LedgerHeight", mock.Anything).Return(uint64(5), nil)
+
+	var data map[uint64]*testData = map[uint64]*testData{
+		uint64(2): {
+			block: &pcomm.Block{
+				Header: &pcomm.BlockHeader{
+					Number:       2,
+					DataHash:     []byte{0, 1, 1, 1},
+					PreviousHash: []byte{0, 0, 0, 1},
+				},
+				Data: &pcomm.BlockData{
+					Data: [][]byte{{1}, {2}, {3}},
+				},
+			},
+			pvtData: PvtDataCollections{
+				{
+					Payload: &ledger.TxPvtData{
+						SeqInBlock: uint64(0),
+						WriteSet: &rwset.TxPvtReadWriteSet{
+							DataModel: rwset.TxReadWriteSet_KV,
+							NsPvtRwset: []*rwset.NsPvtReadWriteSet{
+								{
+									Namespace: "myCC:v1",
+									CollectionPvtRwset: []*rwset.CollectionPvtReadWriteSet{
+										{
+											CollectionName: "mysecrectCollection",
+											Rwset:          []byte{1, 2, 3, 4, 5},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+
+		uint64(3): {
+			block: &pcomm.Block{
+				Header: &pcomm.BlockHeader{
+					Number:       3,
+					DataHash:     []byte{1, 1, 1, 1},
+					PreviousHash: []byte{0, 1, 1, 1},
+				},
+				Data: &pcomm.BlockData{
+					Data: [][]byte{{4}, {5}, {6}},
+				},
+			},
+			pvtData: PvtDataCollections{
+				{
+					Payload: &ledger.TxPvtData{
+						SeqInBlock: uint64(2),
+						WriteSet: &rwset.TxPvtReadWriteSet{
+							DataModel: rwset.TxReadWriteSet_KV,
+							NsPvtRwset: []*rwset.NsPvtReadWriteSet{
+								{
+									Namespace: "otherCC:v1",
+									CollectionPvtRwset: []*rwset.CollectionPvtReadWriteSet{
+										{
+											CollectionName: "topClassified",
+											Rwset:          []byte{0, 0, 0, 4, 2},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for seqNum, each := range data {
+		coord1.On("GetPvtDataAndBlockByNum", seqNum).Return(each.block, each.pvtData, nil /* no error*/)
+	}
+
+	coord1.On("Close")
+
+	servicesAdapater := &ServicesMediator{GossipAdapter: g, MCSAdapter: &cryptoServiceMock{acceptor: noopPeerIdentityAcceptor}}
+	st := NewGossipCoordinatedStateProvider(chainID, servicesAdapater, coord1)
+	defer st.Stop()
+
+	// Mocked state request message
+	requestMsg := new(receivedMessageMock)
+
+	// Get state request message, blocks [2...3]
+	requestGossipMsg := &proto.GossipMessage{
+		// Copy nonce field from the request, so it will be possible to match response
+		Nonce:   1,
+		Tag:     proto.GossipMessage_CHAN_OR_ORG,
+		Channel: []byte(chainID),
+		Content: &proto.GossipMessage_StateRequest{&proto.RemoteStateRequest{
+			StartSeqNum: 2,
+			EndSeqNum:   3,
+		}},
+	}
+
+	msg, _ := requestGossipMsg.NoopSign()
+
+	requestMsg.On("GetGossipMessage").Return(msg)
+
+	// Channel to send responses back
+	responseChannel := make(chan proto.ReceivedMessage)
+	defer close(responseChannel)
+
+	requestMsg.On("Respond", mock.Anything).Run(func(args mock.Arguments) {
+		// Get gossip response to respond back on state request
+		response := args.Get(0).(*proto.GossipMessage)
+		// Wrap it up into received response
+		receivedMsg := new(receivedMessageMock)
+		// Create sign response
+		msg, _ := response.NoopSign()
+		// Mock to respond
+		receivedMsg.On("GetGossipMessage").Return(msg)
+		// Send response
+		responseChannel <- receivedMsg
+	})
+
+	// Send request message via communication channel into state transfer
+	commChannel <- requestMsg
+
+	// State transfer request should result in state response back
+	response := <-responseChannel
+
+	// Start the assertion section
+	stateResponse := response.GetGossipMessage().GetStateResponse()
+
+	assertion := assert.New(t)
+	// Nonce should be equal to Nonce of the request
+	assertion.Equal(response.GetGossipMessage().Nonce, uint64(1))
+	// Payload should not need be nil
+	assertion.NotNil(stateResponse)
+	assertion.NotNil(stateResponse.Payloads)
+	// Exactly two messages expected
+	assertion.Equal(len(stateResponse.Payloads), 2)
+
+	// Assert we have all data and it's same as we expected it
+	for _, each := range stateResponse.Payloads {
+		block := &pcomm.Block{}
+		err := pb.Unmarshal(each.Data, block)
+		assertion.NoError(err)
+
+		assertion.NotNil(block.Header)
+
+		testBlock, ok := data[block.Header.Number]
+		assertion.True(ok)
+
+		for i, d := range testBlock.block.Data.Data {
+			assertion.True(bytes.Equal(d, block.Data.Data[i]))
+		}
+
+		for i, p := range testBlock.pvtData {
+			pvtDataPayload := &proto.PvtDataPayload{}
+			err := pb.Unmarshal(each.PrivateData[i], pvtDataPayload)
+			assertion.NoError(err)
+			pvtRWSet := &rwset.TxPvtReadWriteSet{}
+			err = pb.Unmarshal(pvtDataPayload.Payload, pvtRWSet)
+			assertion.NoError(err)
+			assertion.Equal(p.Payload.WriteSet, pvtRWSet)
+		}
+	}
+}
+
+type testPeer struct {
+	*mocks.GossipMock
+	id            string
+	gossipChannel chan *proto.GossipMessage
+	commChannel   chan proto.ReceivedMessage
+	coord         *coordinatorMock
+}
+
+func (t testPeer) Gossip() <-chan *proto.GossipMessage {
+	return t.gossipChannel
+}
+
+func (t testPeer) Comm() <-chan proto.ReceivedMessage {
+	return t.commChannel
+}
+
+var peers map[string]testPeer = map[string]testPeer{
+	"peer1": {
+		id:            "peer1",
+		gossipChannel: make(chan *proto.GossipMessage),
+		commChannel:   make(chan proto.ReceivedMessage),
+		GossipMock:    &mocks.GossipMock{},
+		coord:         new(coordinatorMock),
+	},
+	"peer2": {
+		id:            "peer2",
+		gossipChannel: make(chan *proto.GossipMessage),
+		commChannel:   make(chan proto.ReceivedMessage),
+		GossipMock:    &mocks.GossipMock{},
+		coord:         new(coordinatorMock),
+	},
+}
+
+func TestTransferOfPvtDataBetweenPeers(t *testing.T) {
+	/*
+	   This test covers pretty basic scenario, there are two peers: "peer1" and "peer2",
+	   while peer2 missing a few blocks in the ledger therefore asking to replicate those
+	   blocks from the first peers.
+
+	   Test going to check that block from one peer will be replicated into second one and
+	   have identical content.
+	*/
+
+	chainID := "testChainID"
+
+	// Initialize peer
+	for _, peer := range peers {
+		peer.On("Accept", mock.Anything, false).Return(peer.Gossip(), nil)
+		peer.On("Accept", mock.Anything, true).Return(nil, peer.Comm())
+		peer.On("UpdateChannelMetadata", mock.Anything, mock.Anything)
+		peer.coord.On("Close")
+		peer.On("Close")
+	}
+
+	// First peer going to have more advanced ledger
+	peers["peer1"].coord.On("LedgerHeight", mock.Anything).Return(uint64(3), nil)
+
+	// Second peer has a gap of one block, hence it will have to replicate it from previous
+	peers["peer2"].coord.On("LedgerHeight", mock.Anything).Return(uint64(2), nil)
+
+	peers["peer1"].coord.On("GetPvtDataAndBlockByNum", uint64(2)).Return(&pcomm.Block{
+		Header: &pcomm.BlockHeader{
+			Number:       2,
+			DataHash:     []byte{0, 1, 1, 1},
+			PreviousHash: []byte{0, 0, 0, 1},
+		},
+		Data: &pcomm.BlockData{
+			Data: [][]byte{{1}, {2}, {3}},
+		},
+	}, PvtDataCollections{}, nil)
+
+	peers["peer1"].coord.On("GetPvtDataAndBlockByNum", uint64(3)).Return(&pcomm.Block{
+		Header: &pcomm.BlockHeader{
+			Number:       3,
+			DataHash:     []byte{0, 0, 0, 1},
+			PreviousHash: []byte{0, 1, 1, 1},
+		},
+		Data: &pcomm.BlockData{
+			Data: [][]byte{{4}, {5}, {6}},
+		},
+	}, PvtDataCollections{&PvtData{
+		Payload: &ledger.TxPvtData{
+			SeqInBlock: uint64(1),
+			WriteSet: &rwset.TxPvtReadWriteSet{
+				DataModel: rwset.TxReadWriteSet_KV,
+				NsPvtRwset: []*rwset.NsPvtReadWriteSet{
+					{
+						Namespace: "myCC:v1",
+						CollectionPvtRwset: []*rwset.CollectionPvtReadWriteSet{
+							{
+								CollectionName: "mysecrectCollection",
+								Rwset:          []byte{1, 2, 3, 4, 5},
+							},
+						},
+					},
+				},
+			},
+		},
+	}}, nil)
+
+	// Return membership of the peers
+	metastate := &NodeMetastate{LedgerHeight: uint64(2)}
+	metaBytes, err := metastate.Bytes()
+	assert.NoError(t, err)
+	member2 := discovery.NetworkMember{
+		PKIid:            common.PKIidType([]byte{2}),
+		Endpoint:         "peer2:7051",
+		InternalEndpoint: "peer2:7051",
+		Metadata:         metaBytes,
+	}
+
+	metastate = &NodeMetastate{LedgerHeight: uint64(3)}
+	metaBytes, err = metastate.Bytes()
+	assert.NoError(t, err)
+	member1 := discovery.NetworkMember{
+		PKIid:            common.PKIidType([]byte{1}),
+		Endpoint:         "peer1:7051",
+		InternalEndpoint: "peer1:7051",
+		Metadata:         metaBytes,
+	}
+
+	peers["peer1"].On("PeersOfChannel", mock.Anything).Return([]discovery.NetworkMember{member2})
+	peers["peer2"].On("PeersOfChannel", mock.Anything).Return([]discovery.NetworkMember{member1})
+
+	peers["peer2"].On("Send", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		request := args.Get(0).(*proto.GossipMessage)
+		requestMsg := new(receivedMessageMock)
+		msg, _ := request.NoopSign()
+		requestMsg.On("GetGossipMessage").Return(msg)
+
+		requestMsg.On("Respond", mock.Anything).Run(func(args mock.Arguments) {
+			response := args.Get(0).(*proto.GossipMessage)
+			receivedMsg := new(receivedMessageMock)
+			msg, _ := response.NoopSign()
+			receivedMsg.On("GetGossipMessage").Return(msg)
+			// Send response back to the peer
+			peers["peer2"].commChannel <- receivedMsg
+		})
+
+		peers["peer1"].commChannel <- requestMsg
+	})
+
+	wg := sync.WaitGroup{}
+	wg.Add(2)
+	peers["peer2"].coord.On("StoreBlock", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		wg.Done() // Done once second peer hits commit of the block
+	}).Return([]string{}, nil) // No pvt data to complete and no error
+
+	cryptoService := &cryptoServiceMock{acceptor: noopPeerIdentityAcceptor}
+
+	mediator := &ServicesMediator{GossipAdapter: peers["peer1"], MCSAdapter: cryptoService}
+	peer1State := NewGossipCoordinatedStateProvider(chainID, mediator, peers["peer1"].coord)
+	defer peer1State.Stop()
+
+	mediator = &ServicesMediator{GossipAdapter: peers["peer2"], MCSAdapter: cryptoService}
+	peer2State := NewGossipCoordinatedStateProvider(chainID, mediator, peers["peer2"].coord)
+	defer peer2State.Stop()
+
+	// Make sure state was replicated
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		done <- struct{}{}
+	}()
+
+	select {
+	case <-done:
+		break
+	case <-time.After(30 * time.Second):
+		t.Fail()
 	}
 }
 

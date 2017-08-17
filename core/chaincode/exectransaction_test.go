@@ -17,6 +17,10 @@ limitations under the License.
 package chaincode
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"math/rand"
 	"net"
@@ -24,15 +28,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"encoding/json"
-	"strings"
-
 	"github.com/golang/protobuf/proto"
-
+	"github.com/hyperledger/fabric/bccsp/factory"
 	mockpolicies "github.com/hyperledger/fabric/common/mocks/policies"
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/common/util"
@@ -41,26 +43,34 @@ import (
 	"github.com/hyperledger/fabric/core/container"
 	"github.com/hyperledger/fabric/core/container/ccintf"
 	"github.com/hyperledger/fabric/core/ledger"
+	"github.com/hyperledger/fabric/core/ledger/ledgerconfig"
+	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/ledger/util/couchdb"
 	"github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/policy"
+	"github.com/hyperledger/fabric/core/policy/mocks"
 	"github.com/hyperledger/fabric/core/scc"
-	pb "github.com/hyperledger/fabric/protos/peer"
-	putils "github.com/hyperledger/fabric/protos/utils"
-
-	"bytes"
-
-	"github.com/hyperledger/fabric/core/ledger/ledgerconfig"
-	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
+	"github.com/hyperledger/fabric/core/testutil"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/msp/mgmt/testtools"
 	"github.com/hyperledger/fabric/protos/common"
+	pb "github.com/hyperledger/fabric/protos/peer"
+	putils "github.com/hyperledger/fabric/protos/utils"
 	"github.com/spf13/viper"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
+
+var runTests bool
+
+func testForSkip(t *testing.T) {
+	//run tests
+	if !runTests {
+		t.SkipNow()
+	}
+}
 
 //initialize peer and start up. If security==enabled, login as vp
 func initPeer(chainIDs ...string) (net.Listener, error) {
@@ -68,6 +78,12 @@ func initPeer(chainIDs ...string) (net.Listener, error) {
 	finitPeer(nil, chainIDs...)
 
 	peer.MockInitialize()
+
+	mspGetter := func(cid string) []string {
+		return []string{"DEFAULT"}
+	}
+
+	peer.MockSetMSPIDGetter(mspGetter)
 
 	var opts []grpc.ServerOption
 	if viper.GetBool("peer.tls.enabled") {
@@ -107,6 +123,10 @@ func initPeer(chainIDs ...string) (net.Listener, error) {
 			return nil, err
 		}
 		scc.DeploySysCCs(id)
+		// any chain other than the default testchainid does not have a MSP set up -> create one
+		if id != util.GetTestChainID() {
+			mspmgmt.XXXSetMSPManager(id, mspmgmt.GetManagerForChain(util.GetTestChainID()))
+		}
 	}
 
 	go grpcServer.Serve(lis)
@@ -149,9 +169,9 @@ func finitPeer(lis net.Listener, chainIDs ...string) {
 	}
 }
 
-func startTxSimulation(ctxt context.Context, chainID string) (context.Context, ledger.TxSimulator, error) {
+func startTxSimulation(ctxt context.Context, chainID string, txid string) (context.Context, ledger.TxSimulator, error) {
 	lgr := peer.GetLedger(chainID)
-	txsim, err := lgr.NewTxSimulator()
+	txsim, err := lgr.NewTxSimulator(txid)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -165,7 +185,7 @@ func startTxSimulation(ctxt context.Context, chainID string) (context.Context, l
 	return ctxt, txsim, nil
 }
 
-func endTxSimulationCDS(chainID string, _ string, txsim ledger.TxSimulator, payload []byte, commit bool, cds *pb.ChaincodeDeploymentSpec, blockNumber uint64) error {
+func endTxSimulationCDS(chainID string, txid string, txsim ledger.TxSimulator, payload []byte, commit bool, cds *pb.ChaincodeDeploymentSpec, blockNumber uint64) error {
 	// get serialized version of the signer
 	ss, err := signer.Serialize()
 	if err != nil {
@@ -187,7 +207,7 @@ func endTxSimulationCDS(chainID string, _ string, txsim ledger.TxSimulator, payl
 	return endTxSimulation(chainID, lsccid, txsim, payload, commit, prop, blockNumber)
 }
 
-func endTxSimulationCIS(chainID string, ccid *pb.ChaincodeID, _ string, txsim ledger.TxSimulator, payload []byte, commit bool, cis *pb.ChaincodeInvocationSpec, blockNumber uint64) error {
+func endTxSimulationCIS(chainID string, ccid *pb.ChaincodeID, txid string, txsim ledger.TxSimulator, payload []byte, commit bool, cis *pb.ChaincodeInvocationSpec, blockNumber uint64) error {
 	// get serialized version of the signer
 	ss, err := signer.Serialize()
 	if err != nil {
@@ -195,9 +215,12 @@ func endTxSimulationCIS(chainID string, ccid *pb.ChaincodeID, _ string, txsim le
 	}
 
 	// get a proposal - we need it to get a transaction
-	prop, _, err := putils.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, chainID, cis, ss)
+	prop, returnedTxid, err := putils.CreateProposalFromCISAndTxid(txid, common.HeaderType_ENDORSER_TRANSACTION, chainID, cis, ss)
 	if err != nil {
 		return err
+	}
+	if returnedTxid != txid {
+		return errors.New("txids are not same")
 	}
 
 	return endTxSimulation(chainID, ccid, txsim, payload, commit, prop, blockNumber)
@@ -217,16 +240,22 @@ func endTxSimulation(chainID string, ccid *pb.ChaincodeID, txsim ledger.TxSimula
 	txsim.Done()
 	if lgr := peer.GetLedger(chainID); lgr != nil {
 		if commit {
-			var txSimulationResults []byte
+			var txSimulationResults *ledger.TxSimulationResults
+			var txSimulationBytes []byte
 			var err error
+
+			txsim.Done()
 
 			//get simulation results
 			if txSimulationResults, err = txsim.GetTxSimulationResults(); err != nil {
 				return err
 			}
-
+			if txSimulationBytes, err = txSimulationResults.GetPubSimulationBytes(); err != nil {
+				return nil
+			}
 			// assemble a (signed) proposal response message
-			resp, err := putils.CreateProposalResponse(prop.Header, prop.Payload, &pb.Response{Status: 200}, txSimulationResults, nil, ccid, nil, signer)
+			resp, err := putils.CreateProposalResponse(prop.Header, prop.Payload, &pb.Response{Status: 200},
+				txSimulationBytes, nil, ccid, nil, signer)
 			if err != nil {
 				return err
 			}
@@ -302,14 +331,12 @@ func deploy2(ctx context.Context, cccid *ccprovider.CCContext, chaincodeDeployme
 		return nil, fmt.Errorf("Error creating lscc spec : %s\n", err)
 	}
 
-	ctx, txsim, err := startTxSimulation(ctx, cccid.ChainID)
+	uuid := util.GenerateUUID()
+	cccid.TxID = uuid
+	ctx, txsim, err := startTxSimulation(ctx, cccid.ChainID, cccid.TxID)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to get handle to simulator: %s ", err)
 	}
-
-	uuid := util.GenerateUUID()
-
-	cccid.TxID = uuid
 
 	defer func() {
 		//no error, lets try commit
@@ -326,14 +353,13 @@ func deploy2(ctx context.Context, cccid *ccprovider.CCContext, chaincodeDeployme
 	ccprovider.PutChaincodeIntoFS(chaincodeDeploymentSpec)
 
 	sysCCVers := util.GetSysCCVersion()
-	sprop, prop := putils.MockSignedEndorserProposalOrPanic(cccid.ChainID, cis.ChaincodeSpec, []byte("Admin"), []byte("msg1"))
+	sprop, prop := putils.MockSignedEndorserProposal2OrPanic(cccid.ChainID, cis.ChaincodeSpec, signer)
 	lsccid := ccprovider.NewCCContext(cccid.ChainID, cis.ChaincodeSpec.ChaincodeId.Name, sysCCVers, uuid, true, sprop, prop)
 
 	//write to lscc
 	if _, _, err = ExecuteWithErrorFilter(ctx, lsccid, cis); err != nil {
 		return nil, fmt.Errorf("Error deploying chaincode (1): %s", err)
 	}
-
 	if b, _, err = ExecuteWithErrorFilter(ctx, cccid, chaincodeDeploymentSpec); err != nil {
 		return nil, fmt.Errorf("Error deploying chaincode(2): %s", err)
 	}
@@ -354,7 +380,7 @@ func invokeWithVersion(ctx context.Context, chainID string, version string, spec
 	uuid = util.GenerateUUID()
 
 	var txsim ledger.TxSimulator
-	ctx, txsim, err = startTxSimulation(ctx, chainID)
+	ctx, txsim, err = startTxSimulation(ctx, chainID, uuid)
 	if err != nil {
 		return nil, uuid, nil, fmt.Errorf("Failed to get handle to simulator: %s ", err)
 	}
@@ -522,21 +548,10 @@ func _(chainID string, _ string) error {
 	return nil
 }
 
-// Disable this temporarily.
-// TODO: Need to enable this after update chaincode interface of chaincode repo.
-// Test deploy of a transaction with a chaincode over HTTP.
-//func TestHTTPExecuteDeployTransaction(t *testing.T) {
-//	chainID := util.GetTestChainID()
-
-//	// The chaincode used here cannot be from the fabric repo
-//	// itself or it won't be downloaded because it will be found
-//	// in GOPATH, which would defeat the test
-//	executeDeployTransaction(t, chainID, "example01", "http://gopkg.in/mastersingh24/fabric-test-resources.v1")
-//}
-
 // Check the correctness of the final state after transaction execution.
 func checkFinalState(cccid *ccprovider.CCContext, a int, b int) error {
-	_, txsim, err := startTxSimulation(context.Background(), cccid.ChainID)
+	txid := util.GenerateUUID()
+	_, txsim, err := startTxSimulation(context.Background(), cccid.ChainID, txid)
 	if err != nil {
 		return fmt.Errorf("Failed to get handle to simulator: %s ", err)
 	}
@@ -634,11 +649,9 @@ func invokeExample02Transaction(ctxt context.Context, cccid *ccprovider.CCContex
 const (
 	chaincodeExample02GolangPath   = "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example02"
 	chaincodeExample04GolangPath   = "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example04"
-	chaincodeExample05GolangPath   = "github.com/hyperledger/fabric/examples/chaincode/go/chaincode_example05"
 	chaincodeEventSenderGolangPath = "github.com/hyperledger/fabric/examples/chaincode/go/eventsender"
 	chaincodeExample02JavaPath     = "../../examples/chaincode/java/chaincode_example02"
 	chaincodeExample04JavaPath     = "../../examples/chaincode/java/chaincode_example04"
-	chaincodeExample05JavaPath     = "../../examples/chaincode/java/chaincode_example05"
 	chaincodeExample06JavaPath     = "../../examples/chaincode/java/chaincode_example06"
 	chaincodeEventSenderJavaPath   = "../../examples/chaincode/java/eventsender"
 )
@@ -789,6 +802,7 @@ func TestGopathExecuteDeployTransaction(t *testing.T) {
 }
 
 func TestExecuteInvokeTransaction(t *testing.T) {
+	testForSkip(t)
 
 	testCases := []struct {
 		chaincodeType pb.ChaincodeSpec_Type
@@ -840,6 +854,8 @@ func TestExecuteInvokeTransaction(t *testing.T) {
 
 // Test the execution of an invalid transaction.
 func TestExecuteInvokeInvalidTransaction(t *testing.T) {
+	testForSkip(t)
+
 	chainID := util.GetTestChainID()
 
 	lis, err := initPeer(chainID)
@@ -885,6 +901,7 @@ type tcicTc struct {
 
 // Test the execution of a chaincode that invokes another chaincode.
 func TestChaincodeInvokeChaincode(t *testing.T) {
+	testForSkip(t)
 	channel := util.GetTestChainID()
 	channel2 := channel + "2"
 	lis, err := initPeer(channel, channel2)
@@ -958,6 +975,7 @@ func stopChaincode(ctx context.Context, chaincodeCtx *ccprovider.CCContext) {
 // Test the execution of a chaincode that invokes another chaincode with wrong parameters. Should receive error from
 // from the called chaincode
 func TestChaincodeInvokeChaincodeErrorCase(t *testing.T) {
+	testForSkip(t)
 	chainID := util.GetTestChainID()
 
 	lis, err := initPeer(chainID)
@@ -1050,6 +1068,7 @@ func TestChaincodeInvokeChaincodeErrorCase(t *testing.T) {
 
 // Test the invocation of a transaction.
 func TestQueries(t *testing.T) {
+	testForSkip(t)
 
 	chainID := util.GetTestChainID()
 
@@ -1138,6 +1157,28 @@ func TestQueries(t *testing.T) {
 		theChaincodeSupport.Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
 		return
 	}
+
+	//FAB-1163- The following range query should timeout and produce an error
+	//the peer should handle this gracefully and not die
+
+	//save the original timeout and set a new timeout of 1 sec
+	origTimeout := theChaincodeSupport.executetimeout
+	theChaincodeSupport.executetimeout = time.Duration(1) * time.Second
+
+	//chaincode to sleep for 2 secs with timeout 1
+	args = util.ToChaincodeArgs(f, "marble001", "marble002", "2000")
+
+	spec = &pb.ChaincodeSpec{Type: 1, ChaincodeId: cID, Input: &pb.ChaincodeInput{Args: args}}
+	_, _, retval, err = invoke(ctxt, chainID, spec, nextBlockNumber, nil)
+	if err == nil {
+		t.Fail()
+		t.Logf("expected timeout error but succeeded")
+		theChaincodeSupport.Stop(ctxt, cccid, &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec})
+		return
+	}
+
+	//restore timeout
+	theChaincodeSupport.executetimeout = origTimeout
 
 	// querying for all marbles will return 101 marbles
 	// this query should return exactly 101 results (one call to Next())
@@ -1365,7 +1406,7 @@ func TestQueries(t *testing.T) {
 }
 
 func TestGetEvent(t *testing.T) {
-
+	testForSkip(t)
 	testCases := []struct {
 		chaincodeType pb.ChaincodeSpec_Type
 		chaincodePath string
@@ -1450,6 +1491,7 @@ func TestGetEvent(t *testing.T) {
 // Test the execution of a chaincode that queries another chaincode
 // example02 implements "query" as a function in Invoke. example05 calls example02
 func TestChaincodeQueryChaincodeUsingInvoke(t *testing.T) {
+	testForSkip(t)
 	//this is essentially same as the ChaincodeInvokeChaincode now that
 	//we don't distinguish between Invoke and Query (there's no separate "Query")
 	t.Skip()
@@ -1574,6 +1616,7 @@ func TestChaincodeQueryChaincodeUsingInvoke(t *testing.T) {
 
 // test that invoking a security-sensitive system chaincode fails
 func TestChaincodeInvokesForbiddenSystemChaincode(t *testing.T) {
+	testForSkip(t)
 	chainID := util.GetTestChainID()
 
 	lis, err := initPeer(chainID)
@@ -1629,6 +1672,7 @@ func TestChaincodeInvokesForbiddenSystemChaincode(t *testing.T) {
 // Test the execution of a chaincode that invokes system chaincode
 // uses the "pthru" chaincode to query "lscc" for the "pthru" chaincode
 func TestChaincodeInvokesSystemChaincode(t *testing.T) {
+	testForSkip(t)
 	chainID := util.GetTestChainID()
 
 	lis, err := initPeer(chainID)
@@ -1692,6 +1736,7 @@ func TestChaincodeInvokesSystemChaincode(t *testing.T) {
 }
 
 func TestChaincodeInitializeInitError(t *testing.T) {
+	testForSkip(t)
 	testCases := []struct {
 		name          string
 		chaincodeType pb.ChaincodeSpec_Type
@@ -1748,17 +1793,44 @@ func TestMain(m *testing.M) {
 	msptesttools.LoadMSPSetupForTesting()
 	signer, err = mspmgmt.GetLocalMSP().GetDefaultSigningIdentity()
 	if err != nil {
-		os.Exit(-1)
 		fmt.Print("Could not initialize msp/signer")
+		os.Exit(-1)
 		return
 	}
 
-	SetupTestConfig()
+	setupTestConfig()
 	os.Exit(m.Run())
 }
 
-func deployChaincode(ctx context.Context, name string, version string, chaincodeType pb.ChaincodeSpec_Type, path string, args [][]byte, creator []byte, channel string, nextBlockNumber uint64) ([]byte, *ccprovider.CCContext, error) {
+func setupTestConfig() {
+	flag.Parse()
 
+	// Now set the configuration file
+	viper.SetEnvPrefix("CORE")
+	viper.AutomaticEnv()
+	replacer := strings.NewReplacer(".", "_")
+	viper.SetEnvKeyReplacer(replacer)
+	viper.SetConfigName("chaincodetest") // name of config file (without extension)
+	viper.AddConfigPath("./")            // path to look for the config file in
+	err := viper.ReadInConfig()          // Find and read the config file
+	if err != nil {                      // Handle errors reading the config file
+		panic(fmt.Errorf("Fatal error config file: %s \n", err))
+	}
+
+	testutil.SetupTestLogging()
+
+	// Set the number of maxprocs
+	var numProcsDesired = viper.GetInt("peer.gomaxprocs")
+	chaincodeLogger.Debugf("setting Number of procs to %d, was %d\n", numProcsDesired, runtime.GOMAXPROCS(numProcsDesired))
+
+	// Init the BCCSP
+	err = factory.InitFactories(nil)
+	if err != nil {
+		panic(fmt.Errorf("Could not initialize BCCSP Factories [%s]", err))
+	}
+}
+
+func deployChaincode(ctx context.Context, name string, version string, chaincodeType pb.ChaincodeSpec_Type, path string, args [][]byte, creator []byte, channel string, nextBlockNumber uint64) ([]byte, *ccprovider.CCContext, error) {
 	chaincodeSpec := &pb.ChaincodeSpec{
 		ChaincodeId: &pb.ChaincodeID{
 			Name:    name,
@@ -1771,7 +1843,7 @@ func deployChaincode(ctx context.Context, name string, version string, chaincode
 		},
 	}
 
-	signedProposal, proposal := putils.MockSignedEndorserProposalOrPanic(channel, chaincodeSpec, creator, nil)
+	signedProposal, proposal := putils.MockSignedEndorserProposal2OrPanic(channel, chaincodeSpec, signer)
 
 	chaincodeCtx := ccprovider.NewCCContext(channel, name, version, "", false, signedProposal, proposal)
 
@@ -1818,7 +1890,7 @@ type mockPolicyCheckerFactory struct{}
 func (f *mockPolicyCheckerFactory) NewPolicyChecker() policy.PolicyChecker {
 	return policy.NewPolicyChecker(
 		peer.NewChannelPolicyManagerGetter(),
-		&policy.MockIdentityDeserializer{[]byte("Admin"), []byte("msg1")},
-		&policy.MockMSPPrincipalGetter{Principal: []byte("Admin")},
+		&mocks.MockIdentityDeserializer{[]byte("Admin"), []byte("msg1")},
+		&mocks.MockMSPPrincipalGetter{Principal: []byte("Admin")},
 	)
 }

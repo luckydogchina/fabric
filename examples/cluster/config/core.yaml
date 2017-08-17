@@ -1,3 +1,18 @@
+# Copyright IBM Corp. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 ###############################################################################
 #
 #    LOGGING section
@@ -30,13 +45,17 @@ logging:
     # Developers: Please see fabric/docs/Setup/logging-control.md for more
     # options.
     peer:       warning
-    node:       info
+    node:       warning
     network:    warning
     version:    warning
-    protoutils: debug
+    protoutils: warning
     error:      warning
     msp:        warning
-    gossip:     debug
+    gossip:     warning
+    grpc:       warning
+    ledger:     warning
+    policies:   warning
+    cauthdsl:   warning
 
     format: '%{color}%{time:2006-01-02 15:04:05.000 MST} [%{module}] %{shortfunc} -> %{level:.4s} %{id:03x}%{color:reset} %{message}'
 
@@ -62,11 +81,10 @@ peer:
     address: 0.0.0.0:7051
     # Whether the Peer should programmatically determine its address
     # This case is useful for docker containers.
-    addressAutoDetect: true
+    addressAutoDetect: false
 
     # Setting for runtime.GOMAXPROCS(n). If n < 1, it does not change the current setting
     gomaxprocs: -1
-    workers: 2
 
     # Gossip related configuration
     gossip:
@@ -137,9 +155,6 @@ peer:
         # This is an endpoint that is published to peers outside of the organization.
         # If this isn't set, the peer will not be known to other organizations.
         externalEndpoint:
-        # Makes gossip skip verification of remote peer signature when performing
-        # the authentication handshake with remote peers
-        skipHandshake: true
 
         # Leader election service configuration
         election:
@@ -221,7 +236,7 @@ peer:
             # SHA2 is hardcoded in several places, not only BCCSP
             Hash: SHA2
             Security: 256
-            # Location of Key Store, can be subdirectory of SbftLocal.DataDir
+            # Location of Key Store
             FileKeyStore:
                 # If "", defaults to 'mspConfigPath'/keystore
                 # TODO: Ensure this is read with fabric/core/config.GetPath() once ready
@@ -358,7 +373,7 @@ chaincode:
     # chaincode/importsysccs.go
     system:
         cscc: enable
-        lccc: enable
+        lscc: enable
         escc: enable
         vscc: enable
         qscc: enable

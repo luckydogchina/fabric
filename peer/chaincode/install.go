@@ -35,16 +35,16 @@ import (
 
 var chaincodeInstallCmd *cobra.Command
 
-const install_cmdname = "install"
+const installCmdName = "install"
 
-const install_desc = "Package the specified chaincode into a deployment spec and save it on the peer's path."
+const installDesc = "Package the specified chaincode into a deployment spec and save it on the peer's path."
 
 // installCmd returns the cobra command for Chaincode Deploy
 func installCmd(cf *ChaincodeCmdFactory) *cobra.Command {
 	chaincodeInstallCmd = &cobra.Command{
 		Use:       "install",
-		Short:     fmt.Sprint(install_desc),
-		Long:      fmt.Sprint(install_desc),
+		Short:     fmt.Sprint(installDesc),
+		Long:      fmt.Sprint(installDesc),
 		ValidArgs: []string{"1"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var ccpackfile string
@@ -54,6 +54,14 @@ func installCmd(cf *ChaincodeCmdFactory) *cobra.Command {
 			return chaincodeInstall(cmd, ccpackfile, cf)
 		},
 	}
+	flagList := []string{
+		"lang",
+		"ctor",
+		"path",
+		"name",
+		"version",
+	}
+	attachFlags(chaincodeInstallCmd, flagList)
 
 	return chaincodeInstallCmd
 }
@@ -88,11 +96,10 @@ func install(msg proto.Message, cf *ChaincodeCmdFactory) error {
 	return nil
 }
 
-//generateChaincode creates ChaincodeDeploymentSpec as the package to install
-func generateChaincode(cmd *cobra.Command, chaincodeName, chaincodeVersion string) (*pb.ChaincodeDeploymentSpec, error) {
-	tmppkg, _ := ccprovider.GetChaincodePackage(chaincodeName, chaincodeVersion)
-	if tmppkg != nil {
-		return nil, fmt.Errorf("chaincode %s:%s exists", chaincodeName, chaincodeVersion)
+//genChaincodeDeploymentSpec creates ChaincodeDeploymentSpec as the package to install
+func genChaincodeDeploymentSpec(cmd *cobra.Command, chaincodeName, chaincodeVersion string) (*pb.ChaincodeDeploymentSpec, error) {
+	if existed, _ := ccprovider.ChaincodePackageExists(chaincodeName, chaincodeVersion); existed {
+		return nil, fmt.Errorf("chaincode %s:%s already exists", chaincodeName, chaincodeVersion)
 	}
 
 	spec, err := getChaincodeSpec(cmd)
@@ -115,17 +122,14 @@ func getPackageFromFile(ccpackfile string) (proto.Message, *pb.ChaincodeDeployme
 		return nil, nil, err
 	}
 
-	//the bytes should be a valid package (CDS or SigedCDS)
+	//the bytes should be a valid package (CDS or SignedCDS)
 	ccpack, err := ccprovider.GetCCPackage(b)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	//either CDS or Envelope
-	o, err := ccpack.GetPackageObject(), nil
-	if err != nil {
-		return nil, nil, err
-	}
+	o := ccpack.GetPackageObject()
 
 	//try CDS first
 	cds, ok := o.(*pb.ChaincodeDeploymentSpec)
@@ -164,11 +168,11 @@ func chaincodeInstall(cmd *cobra.Command, ccpackfile string, cf *ChaincodeCmdFac
 
 	var ccpackmsg proto.Message
 	if ccpackfile == "" {
-		if chaincodePath == common.UndefinedParamValue || chaincodeVersion == common.UndefinedParamValue {
-			return fmt.Errorf("Must supply value for %s path and version parameters.", chainFuncName)
+		if chaincodePath == common.UndefinedParamValue || chaincodeVersion == common.UndefinedParamValue || chaincodeName == common.UndefinedParamValue {
+			return fmt.Errorf("Must supply value for %s name, path and version parameters.", chainFuncName)
 		}
 		//generate a raw ChaincodeDeploymentSpec
-		ccpackmsg, err = generateChaincode(cmd, chaincodeName, chaincodeVersion)
+		ccpackmsg, err = genChaincodeDeploymentSpec(cmd, chaincodeName, chaincodeVersion)
 		if err != nil {
 			return err
 		}

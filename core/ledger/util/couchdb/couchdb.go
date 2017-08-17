@@ -180,8 +180,8 @@ type CouchDoc struct {
 	Attachments []*Attachment
 }
 
-//BatchRetrieveDocMedatadataResponse is used for processing REST batch responses from CouchDB
-type BatchRetrieveDocMedatadataResponse struct {
+//BatchRetrieveDocMetadataResponse is used for processing REST batch responses from CouchDB
+type BatchRetrieveDocMetadataResponse struct {
 	Rows []struct {
 		ID  string `json:"id"`
 		Doc struct {
@@ -268,7 +268,7 @@ func (dbclient *CouchDatabase) CreateDatabaseIfNotExist() (*DBOperationResponse,
 		maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
 		//process the URL with a PUT, creates the database
-		resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPut, connectURL.String(), nil, "", "", maxRetries)
+		resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPut, connectURL.String(), nil, "", "", maxRetries, true)
 		if err != nil {
 			return nil, err
 		}
@@ -309,7 +309,7 @@ func (dbclient *CouchDatabase) GetDatabaseInfo() (*DBInfo, *DBReturn, error) {
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, couchDBReturn, err := dbclient.CouchInstance.handleRequest(http.MethodGet, connectURL.String(), nil, "", "", maxRetries)
+	resp, couchDBReturn, err := dbclient.CouchInstance.handleRequest(http.MethodGet, connectURL.String(), nil, "", "", maxRetries, true)
 	if err != nil {
 		return nil, couchDBReturn, err
 	}
@@ -347,7 +347,7 @@ func (couchInstance *CouchInstance) VerifyCouchConfig() (*ConnectionInfo, *DBRet
 	maxRetriesOnStartup := couchInstance.conf.MaxRetriesOnStartup
 
 	resp, couchDBReturn, err := couchInstance.handleRequest(http.MethodGet, connectURL.String(), nil,
-		couchInstance.conf.Username, couchInstance.conf.Password, maxRetriesOnStartup)
+		couchInstance.conf.Username, couchInstance.conf.Password, maxRetriesOnStartup, true)
 
 	if err != nil {
 		return nil, couchDBReturn, fmt.Errorf("Unable to connect to CouchDB, check the hostname and port: %s", err.Error())
@@ -396,7 +396,7 @@ func (dbclient *CouchDatabase) DropDatabase() (*DBOperationResponse, error) {
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodDelete, connectURL.String(), nil, "", "", maxRetries)
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodDelete, connectURL.String(), nil, "", "", maxRetries, true)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +436,7 @@ func (dbclient *CouchDatabase) EnsureFullCommit() (*DBOperationResponse, error) 
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, connectURL.String(), nil, "", "", maxRetries)
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, connectURL.String(), nil, "", "", maxRetries, true)
 	if err != nil {
 		logger.Errorf("Failed to invoke _ensure_full_commit Error: %s\n", err.Error())
 		return nil, err
@@ -465,6 +465,7 @@ func (dbclient *CouchDatabase) EnsureFullCommit() (*DBOperationResponse, error) 
 func (dbclient *CouchDatabase) SaveDoc(id string, rev string, couchDoc *CouchDoc) (string, error) {
 
 	logger.Debugf("Entering SaveDoc()  id=[%s]", id)
+
 	if !utf8.ValidString(id) {
 		return "", fmt.Errorf("doc id [%x] not a valid utf8 string", id)
 	}
@@ -479,19 +480,6 @@ func (dbclient *CouchDatabase) SaveDoc(id string, rev string, couchDoc *CouchDoc
 	// id can contain a '/', so encode separately
 	saveURL = &url.URL{Opaque: saveURL.String() + "/" + encodePathElement(id)}
 
-	if rev == "" {
-
-		//See if the document already exists, we need the rev for save
-		_, revdoc, err2 := dbclient.ReadDoc(id)
-		if err2 != nil {
-			//set the revision to indicate that the document was not found
-			rev = ""
-		} else {
-			//set the revision to the rev returned from the document read
-			rev = revdoc
-		}
-	}
-
 	logger.Debugf("  rev=%s", rev)
 
 	//Set up a buffer for the data to be pushed to couchdb
@@ -499,6 +487,9 @@ func (dbclient *CouchDatabase) SaveDoc(id string, rev string, couchDoc *CouchDoc
 
 	//Set up a default boundary for use by multipart if sending attachments
 	defaultBoundary := ""
+
+	//Create a flag for shared connections.  This is set to false for zero length attachments
+	keepConnectionOpen := true
 
 	//check to see if attachments is nil, if so, then this is a JSON only
 	if couchDoc.Attachments == nil {
@@ -519,6 +510,13 @@ func (dbclient *CouchDatabase) SaveDoc(id string, rev string, couchDoc *CouchDoc
 			return "", err3
 		}
 
+		//If there is a zero length attachment, do not keep the connection open
+		for _, attach := range couchDoc.Attachments {
+			if attach.Length < 1 {
+				keepConnectionOpen = false
+			}
+		}
+
 		//Set the data buffer to the data from the create multi-part data
 		data = multipartData.Bytes()
 
@@ -530,8 +528,10 @@ func (dbclient *CouchDatabase) SaveDoc(id string, rev string, couchDoc *CouchDoc
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	//handle the request for saving the JSON or attachments
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPut, saveURL.String(), data, rev, defaultBoundary, maxRetries)
+	//handle the request for saving document with a retry if there is a revision conflict
+	resp, _, err := dbclient.handleRequestWithRevisionRetry(id, http.MethodPut,
+		*saveURL, data, rev, defaultBoundary, maxRetries, keepConnectionOpen)
+
 	if err != nil {
 		return "", err
 	}
@@ -547,6 +547,20 @@ func (dbclient *CouchDatabase) SaveDoc(id string, rev string, couchDoc *CouchDoc
 
 	return revision, nil
 
+}
+
+//getDocumentRevision will return the revision if the document exists, otherwise it will return ""
+func (dbclient *CouchDatabase) getDocumentRevision(id string) string {
+
+	var rev = ""
+
+	//See if the document already exists, we need the rev for saves and deletes
+	_, revdoc, err := dbclient.ReadDoc(id)
+	if err == nil {
+		//set the revision to the rev returned from the document read
+		rev = revdoc
+	}
+	return rev
 }
 
 func createAttachmentPart(couchDoc *CouchDoc, defaultBoundary string) (bytes.Buffer, string, error) {
@@ -635,7 +649,8 @@ func getRevisionHeader(resp *http.Response) (string, error) {
 
 }
 
-//ReadDoc method provides function to retrieve a document from the database by id
+//ReadDoc method provides function to retrieve a document and its revision
+//from the database by id
 func (dbclient *CouchDatabase) ReadDoc(id string) (*CouchDoc, string, error) {
 	var couchDoc CouchDoc
 	attachments := []*Attachment{}
@@ -662,7 +677,7 @@ func (dbclient *CouchDatabase) ReadDoc(id string) (*CouchDoc, string, error) {
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, couchDBReturn, err := dbclient.CouchInstance.handleRequest(http.MethodGet, readURL.String(), nil, "", "", maxRetries)
+	resp, couchDBReturn, err := dbclient.CouchInstance.handleRequest(http.MethodGet, readURL.String(), nil, "", "", maxRetries, true)
 	if err != nil {
 		if couchDBReturn != nil && couchDBReturn.StatusCode == 404 {
 			logger.Debug("Document not found (404), returning nil value instead of 404 error")
@@ -815,7 +830,7 @@ func (dbclient *CouchDatabase) ReadDocRange(startKey, endKey string, limit, skip
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodGet, rangeURL.String(), nil, "", "", maxRetries)
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodGet, rangeURL.String(), nil, "", "", maxRetries, true)
 	if err != nil {
 		return nil, err
 	}
@@ -895,27 +910,14 @@ func (dbclient *CouchDatabase) DeleteDoc(id, rev string) error {
 	// id can contain a '/', so encode separately
 	deleteURL = &url.URL{Opaque: deleteURL.String() + "/" + encodePathElement(id)}
 
-	if rev == "" {
-
-		//See if the document already exists, we need the rev for delete
-		_, revdoc, err2 := dbclient.ReadDoc(id)
-		if err2 != nil {
-			//set the revision to indicate that the document was not found
-			rev = ""
-		} else {
-			//set the revision to the rev returned from the document read
-			rev = revdoc
-		}
-	}
-
-	logger.Debugf("  rev=%s", rev)
-
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, couchDBReturn, err := dbclient.CouchInstance.handleRequest(http.MethodDelete, deleteURL.String(), nil, rev, "", maxRetries)
+	//handle the request for saving document with a retry if there is a revision conflict
+	resp, couchDBReturn, err := dbclient.handleRequestWithRevisionRetry(id, http.MethodDelete,
+		*deleteURL, nil, "", "", maxRetries, true)
+
 	if err != nil {
-		fmt.Printf("couchDBReturn=%v", couchDBReturn)
 		if couchDBReturn != nil && couchDBReturn.StatusCode == 404 {
 			logger.Debug("Document not found (404), returning nil value instead of 404 error")
 			// non-existent document should return nil value instead of a 404 error
@@ -950,7 +952,7 @@ func (dbclient *CouchDatabase) QueryDocuments(query string) (*[]QueryResult, err
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, queryURL.String(), []byte(query), "", "", maxRetries)
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, queryURL.String(), []byte(query), "", "", maxRetries, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1036,7 +1038,7 @@ func (dbclient *CouchDatabase) BatchRetrieveIDRevision(keys []string) ([]*DocMet
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, batchURL.String(), jsonKeys, "", "", maxRetries)
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, batchURL.String(), jsonKeys, "", "", maxRetries, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1054,7 +1056,7 @@ func (dbclient *CouchDatabase) BatchRetrieveIDRevision(keys []string) ([]*DocMet
 		return nil, err
 	}
 
-	var jsonResponse = &BatchRetrieveDocMedatadataResponse{}
+	var jsonResponse = &BatchRetrieveDocMetadataResponse{}
 
 	err2 := json.Unmarshal(jsonResponseRaw, &jsonResponse)
 	if err2 != nil {
@@ -1131,7 +1133,7 @@ func (dbclient *CouchDatabase) BatchUpdateDocuments(documents []*CouchDoc) ([]*B
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, batchURL.String(), jsonKeys, "", "", maxRetries)
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, batchURL.String(), jsonKeys, "", "", maxRetries, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1162,11 +1164,54 @@ func (dbclient *CouchDatabase) BatchUpdateDocuments(documents []*CouchDoc) ([]*B
 
 }
 
+//handleRequestWithRevisionRetry method is a generic http request handler with
+//a retry for document revision conflict errors,
+//which may be detected during saves or deletes that timed out from client http perspective,
+//but which eventually succeeded in couchdb
+func (dbclient *CouchDatabase) handleRequestWithRevisionRetry(id, method string, connectURL url.URL, data []byte, rev string,
+	multipartBoundary string, maxRetries int, keepConnectionOpen bool) (*http.Response, *DBReturn, error) {
+
+	//Initialize a flag for the revision conflict
+	revisionConflictDetected := false
+	var resp *http.Response
+	var couchDBReturn *DBReturn
+	var errResp error
+
+	//attempt the http request for the max number of retries
+	//In this case, the retry is to catch problems where a client timeout may miss a
+	//successful CouchDB update and cause a document revision conflict on a retry in handleRequest
+	for attempts := 0; attempts < maxRetries; attempts++ {
+
+		//if the revision was not passed in, or if a revision conflict is detected on prior attempt,
+		//query CouchDB for the document revision
+		if rev == "" || revisionConflictDetected {
+			rev = dbclient.getDocumentRevision(id)
+		}
+
+		//handle the request for saving/deleting the couchdb data
+		resp, couchDBReturn, errResp = dbclient.CouchInstance.handleRequest(method, connectURL.String(),
+			data, rev, multipartBoundary, maxRetries, keepConnectionOpen)
+
+		//If there was a 409 conflict error during the save/delete, log it and retry it.
+		//Otherwise, break out of the retry loop
+		if couchDBReturn != nil && couchDBReturn.StatusCode == 409 {
+			logger.Warningf("CouchDB document revision conflict detected, retrying. Attempt:%v", attempts+1)
+			revisionConflictDetected = true
+		} else {
+			break
+		}
+	}
+
+	// return the handleRequest results
+	return resp, couchDBReturn, errResp
+}
+
 //handleRequest method is a generic http request handler.
-// if it returns an error, it ensures that the response body is closed, else it is the
-// callee's responsibility to close response correctly
+// If it returns an error, it ensures that the response body is closed, else it is the
+// callee's responsibility to close response correctly.
+// Any http error or CouchDB error (4XX or 500) will result in a golang error getting returned
 func (couchInstance *CouchInstance) handleRequest(method, connectURL string, data []byte, rev string,
-	multipartBoundary string, maxRetries int) (*http.Response, *DBReturn, error) {
+	multipartBoundary string, maxRetries int, keepConnectionOpen bool) (*http.Response, *DBReturn, error) {
 
 	logger.Debugf("Entering handleRequest()  method=%s  url=%v", method, connectURL)
 
@@ -1177,6 +1222,10 @@ func (couchInstance *CouchInstance) handleRequest(method, connectURL string, dat
 
 	//set initial wait duration for retries
 	waitDuration := retryWaitTime * time.Millisecond
+
+	if maxRetries < 1 {
+		return nil, nil, fmt.Errorf("Number of retries must be greater than zero.")
+	}
 
 	//attempt the http request for the max number of retries
 	for attempts := 0; attempts < maxRetries; attempts++ {
@@ -1190,6 +1239,13 @@ func (couchInstance *CouchInstance) handleRequest(method, connectURL string, dat
 		req, err := http.NewRequest(method, connectURL, payloadData)
 		if err != nil {
 			return nil, nil, err
+		}
+
+		//set the request to close on completion if shared connections are not allowSharedConnection
+		//Current CouchDB has a problem with zero length attachments, do not allow the connection to be reused.
+		//Apache JIRA item for CouchDB   https://issues.apache.org/jira/browse/COUCHDB-3394
+		if !keepConnectionOpen {
+			req.Close = true
 		}
 
 		//add content header for PUT
@@ -1233,20 +1289,25 @@ func (couchInstance *CouchInstance) handleRequest(method, connectURL string, dat
 		//Execute http request
 		resp, errResp = couchInstance.client.Do(req)
 
-		//if an error is not detected then drop out of the retry
+		//check to see if the return from CouchDB is valid
+		if invalidCouchDBReturn(resp, errResp) {
+			continue
+		}
+
+		//if there is no golang http error and no CouchDB 500 error, then drop out of the retry
 		if errResp == nil && resp != nil && resp.StatusCode < 500 {
 			break
 		}
 
-		//if this is an error, record the retry error, else this is a 500 error
+		//if this is an unexpected golang http error, log the error and retry
 		if errResp != nil {
 
 			//Log the error with the retry count and continue
 			logger.Warningf("Retrying couchdb request in %s. Attempt:%v  Error:%v",
 				waitDuration.String(), attempts+1, errResp.Error())
 
+			//otherwise this is an unexpected 500 error from CouchDB. Log the error and retry.
 		} else {
-
 			//Read the response body and close it for next attempt
 			jsonError, err := ioutil.ReadAll(resp.Body)
 			closeResponseBody(resp)
@@ -1270,18 +1331,27 @@ func (couchInstance *CouchInstance) handleRequest(method, connectURL string, dat
 		//backoff, doubling the retry time for next attempt
 		waitDuration *= 2
 
-	}
+	} // end retry loop
 
-	//if the error present, return the error
+	//if a golang http error is still present after retries are exhausted, return the error
 	if errResp != nil {
 		return nil, nil, errResp
+	}
+
+	//This situation should not occur according to the golang spec.
+	//if this error returned (errResp) from an http call, then the resp should be not nil,
+	//this is a structure and StatusCode is an int
+	//This is meant to provide a more graceful error if this should occur
+	if invalidCouchDBReturn(resp, errResp) {
+		return nil, nil, fmt.Errorf("Unable to connect to CouchDB, check the hostname and port.")
 	}
 
 	//set the return code for the couchDB request
 	couchDBReturn.StatusCode = resp.StatusCode
 
-	//check to see if the status code is 400 or higher
-	//response codes 4XX and 500 will be treated as errors
+	//check to see if the status code from couchdb is 400 or higher
+	//response codes 4XX and 500 will be treated as errors -
+	//golang error will be created from the couchDBReturn contents and both will be returned
 	if resp.StatusCode >= 400 {
 		// close the response before returning error
 		defer closeResponseBody(resp)
@@ -1307,8 +1377,16 @@ func (couchInstance *CouchInstance) handleRequest(method, connectURL string, dat
 
 	logger.Debugf("Exiting handleRequest()")
 
-	//If no errors, then return the results
+	//If no errors, then return the http response and the couchdb return object
 	return resp, couchDBReturn, nil
+}
+
+//invalidCouchDBResponse checks to make sure either a valid response or error is returned
+func invalidCouchDBReturn(resp *http.Response, errResp error) bool {
+	if resp == nil && errResp == nil {
+		return true
+	}
+	return false
 }
 
 //IsJSON tests a string to determine if a valid JSON

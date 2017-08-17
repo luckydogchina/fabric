@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package pull
@@ -54,8 +44,9 @@ func (pm *pullMsg) GetSourceEnvelope() *proto.Envelope {
 }
 
 func (pm *pullMsg) Respond(msg *proto.GossipMessage) {
+	sMsg, _ := msg.NoopSign()
 	pm.respondChan <- &pullMsg{
-		msg:         msg.NoopSign(),
+		msg:         sMsg,
 		respondChan: pm.respondChan,
 	}
 }
@@ -296,13 +287,15 @@ func TestHandleMessage(t *testing.T) {
 	})
 
 	// inst1 sends hello to inst2
-	inst2.mediator.HandleMessage(inst1.wrapPullMsg(helloMsg().NoopSign()))
+	sMsg, _ := helloMsg().NoopSign()
+	inst2.mediator.HandleMessage(inst1.wrapPullMsg(sMsg))
 
 	// inst2 is expected to send digest to inst1
 	waitUntilOrFail(t, func() bool { return atomic.LoadInt32(&inst1ReceivedDigest) == int32(1) })
 
 	// inst1 sends request to inst2
-	inst2.mediator.HandleMessage(inst1.wrapPullMsg(reqMsg("0", "1", "2").NoopSign()))
+	sMsg, _ = reqMsg("0", "1", "2").NoopSign()
+	inst2.mediator.HandleMessage(inst1.wrapPullMsg(sMsg))
 
 	// inst2 is expected to send response to inst1
 	waitUntilOrFail(t, func() bool { return atomic.LoadInt32(&inst1ReceivedResponse) == int32(1) })
@@ -325,7 +318,7 @@ func waitUntilOrFail(t *testing.T, pred func() bool) {
 }
 
 func dataMsg(seqNum int) *proto.SignedGossipMessage {
-	return (&proto.GossipMessage{
+	sMsg, _ := (&proto.GossipMessage{
 		Nonce: 0,
 		Tag:   proto.GossipMessage_EMPTY,
 		Content: &proto.GossipMessage_DataMsg{
@@ -337,6 +330,7 @@ func dataMsg(seqNum int) *proto.SignedGossipMessage {
 			},
 		},
 	}).NoopSign()
+	return sMsg
 }
 
 func helloMsg() *proto.GossipMessage {

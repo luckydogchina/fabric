@@ -1,8 +1,8 @@
 Working with Gerrit
 ===================
 
-Follow these instructions to collaborate on the Hyperledger Fabric
-Project through the Gerrit review system.
+Follow these instructions to collaborate on Hyperledger Fabric
+through the Gerrit review system.
 
 Please be sure that you are subscribed to the `mailing
 list <http://lists.hyperledger.org/mailman/listinfo/hyperledger-fabric>`__
@@ -19,8 +19,8 @@ Gerrit assigns the following roles to users:
 -  **Builders**: (e.g. Jenkins) May use the build automation
    infrastructure to verify the change.
 
-Maintainers should be familiar with the `review
-process <reviewing.md>`__. However, anyone is welcome to (and
+Maintainers should be familiar with the :doc:`review
+process <reviewing>`. However, anyone is welcome to (and
 encouraged!) review changes, and hence may find that document of value.
 
 Git-review
@@ -48,7 +48,7 @@ A comprehensive walk-through of Gerrit is beyond the scope of this
 document. There are plenty of resources available on the Internet. A
 good summary can be found
 `here <https://www.mediawiki.org/wiki/Gerrit/Tutorial>`__. We have also
-provided a set of `Best Practices <best-practices.md>`__ that you may
+provided a set of :doc:`Best Practices <best-practices>` that you may
 find helpful.
 
 Working with a local clone of the repository
@@ -72,7 +72,7 @@ To work on something, whether a new feature or a bugfix:
 **Note:** if you are cloning the fabric project repository, you will
 want to clone it to the ``$GOPATH/src/github.com/hyperledger`` directory
 so that it will build, and so that you can use it with the Vagrant
-`development environment <../dev-setup/devenv.md>`__.
+:doc:`development environment <../dev-setup/devenv>`.
 
 4. Create a descriptively-named branch off of your cloned repository
 
@@ -82,7 +82,7 @@ so that it will build, and so that you can use it with the Vagrant
     git checkout -b issue-nnnn
 
 5. Commit your code. For an in-depth discussion of creating an effective
-   commit, please read `this document <changes.md>`__.
+   commit, please read :doc:`this document on submitting changes <changes>`.
 
 ::
 
@@ -99,8 +99,9 @@ Submitting a Change
 -------------------
 
 Currently, Gerrit is the only method to submit a change for review.
-**Please review the `guidelines <changes.md>`__ for making and
-submitting a change**.
+
+**Note:** Please review the :doc:`guidelines <changes>` for making and
+submitting a change.
 
 Use git review
 ~~~~~~~~~~~~~~
@@ -130,15 +131,14 @@ and then repeat the ``git review`` command.
 Not Use git review
 ~~~~~~~~~~~~~~~~~~
 
-Directions for building the source code can be found
-`here <../dev-setup/build.md>`__.
+See the :doc:`directions for building the source code <../dev-setup/build>`.
 
 When a change is ready for submission, Gerrit requires that the change
 be pushed to a special branch. The name of this special branch contains
 a reference to the final branch where the code should reside, once
 accepted.
 
-For the Hyperledger Fabric Project, the special branch is called
+For the Hyperledger Fabric repository, the special branch is called
 ``refs/for/master``.
 
 To push the current local development branch to the gerrit server, open
@@ -239,8 +239,12 @@ If you collaborate in multiple projects, you may wish to limit searching
 to the specific branch through the search bar in the upper-right side.
 
 Add the filter *project:fabric* to limit the visible changes to only
-those from the Hyperledger Fabric Project.
+those from Hyperledger Fabric.
 
 List all current changes you submitted, or list just those changes in
 need of your input by clicking on ``My --> Changes`` or `open this
 link <https://gerrit.hyperledger.org/r/#/dashboard/self>`__
+
+.. Licensed under Creative Commons Attribution 4.0 International License
+   https://creativecommons.org/licenses/by/4.0/
+

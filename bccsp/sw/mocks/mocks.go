@@ -18,6 +18,7 @@ package mocks
 
 import (
 	"errors"
+	"hash"
 	"reflect"
 
 	"github.com/hyperledger/fabric/bccsp"
@@ -94,4 +95,85 @@ func (s *Verifier) Verify(k bccsp.Key, signature, digest []byte, opts bccsp.Sign
 	}
 
 	return s.Value, s.Err
+}
+
+type Hasher struct {
+	MsgArg  []byte
+	OptsArg bccsp.HashOpts
+
+	Value     []byte
+	ValueHash hash.Hash
+	Err       error
+}
+
+func (h *Hasher) Hash(msg []byte, opts bccsp.HashOpts) (hash []byte, err error) {
+	if !reflect.DeepEqual(h.MsgArg, msg) {
+		return nil, errors.New("invalid message")
+	}
+	if !reflect.DeepEqual(h.OptsArg, opts) {
+		return nil, errors.New("invalid opts")
+	}
+
+	return h.Value, h.Err
+}
+
+func (h *Hasher) GetHash(opts bccsp.HashOpts) (hash.Hash, error) {
+	if !reflect.DeepEqual(h.OptsArg, opts) {
+		return nil, errors.New("invalid opts")
+	}
+
+	return h.ValueHash, h.Err
+}
+
+type KeyGenerator struct {
+	OptsArg bccsp.KeyGenOpts
+
+	Value bccsp.Key
+	Err   error
+}
+
+func (kg *KeyGenerator) KeyGen(opts bccsp.KeyGenOpts) (k bccsp.Key, err error) {
+	if !reflect.DeepEqual(kg.OptsArg, opts) {
+		return nil, errors.New("invalid opts")
+	}
+
+	return kg.Value, kg.Err
+}
+
+type KeyDeriver struct {
+	KeyArg  bccsp.Key
+	OptsArg bccsp.KeyDerivOpts
+
+	Value bccsp.Key
+	Err   error
+}
+
+func (kd *KeyDeriver) KeyDeriv(k bccsp.Key, opts bccsp.KeyDerivOpts) (dk bccsp.Key, err error) {
+	if !reflect.DeepEqual(kd.KeyArg, k) {
+		return nil, errors.New("invalid key")
+	}
+	if !reflect.DeepEqual(kd.OptsArg, opts) {
+		return nil, errors.New("invalid opts")
+	}
+
+	return kd.Value, kd.Err
+}
+
+type KeyImporter struct {
+	RawArg  []byte
+	OptsArg bccsp.KeyImportOpts
+
+	Value bccsp.Key
+	Err   error
+}
+
+func (ki *KeyImporter) KeyImport(raw interface{}, opts bccsp.KeyImportOpts) (k bccsp.Key, err error) {
+	if !reflect.DeepEqual(ki.RawArg, raw) {
+		return nil, errors.New("invalid raw")
+	}
+	if !reflect.DeepEqual(ki.OptsArg, opts) {
+		return nil, errors.New("invalid opts")
+	}
+
+	return ki.Value, ki.Err
 }
